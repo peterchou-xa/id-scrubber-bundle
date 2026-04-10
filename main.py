@@ -238,8 +238,13 @@ def scrub_pdf(pdf_path: str, pii_values: list[str], output_path: str) -> None:
                 tw = fitz.TextWriter(page.rect)
                 tw.append(point, replacement, font=font, fontsize=fontsize)
                 tw.write_text(page, color=text_color)
+                text_width = font.text_length(replacement, fontsize=fontsize)
             else:
                 page.insert_text(point, replacement, fontsize=fontsize, color=text_color)
+                text_width = fitz.get_text_length(replacement, fontname=font_name, fontsize=fontsize)
+            # Draw a transparent highlight border sized to the actual replacement text width
+            text_rect = fitz.Rect(rect.x0, rect.y0, rect.x0 + text_width, rect.y1)
+            page.draw_rect(text_rect, color=(1, 0.5, 0), width=0.8, fill=(1, 0.85, 0), fill_opacity=0.25)
     doc.save(output_path)
     doc.close()
 
