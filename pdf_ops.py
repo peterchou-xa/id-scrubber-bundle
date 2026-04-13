@@ -493,35 +493,6 @@ def mask_pii_value(value: str) -> str:
 # ── Subset font expansion ───────────────────────────────────────────
 
 
-def _avg_capital_margin(glyf_table, hmtx, glyph_order, cid_to_uni, identity_mapping, gid_map_data=None):
-    """Compute average side-bearing ratio from existing capital glyphs."""
-    ratios = []
-    for cid, uni in cid_to_uni.items():
-        if not (0x41 <= uni <= 0x5A):
-            continue
-        if identity_mapping:
-            if cid >= len(glyph_order):
-                continue
-            gname = glyph_order[cid]
-        elif gid_map_data is not None:
-            gid_bytes = gid_map_data[cid * 2 : cid * 2 + 2]
-            if len(gid_bytes) < 2:
-                continue
-            gid = struct.unpack(">H", gid_bytes)[0]
-            if gid == 0 or gid >= len(glyph_order):
-                continue
-            gname = glyph_order[gid]
-        else:
-            continue
-        w, lsb = hmtx[gname]
-        if w <= 0:
-            continue
-        g = glyf_table[gname]
-        rsb = w - g.xMax
-        ratios.append((lsb + rsb) / w)
-    return sum(ratios) / len(ratios) if ratios else 0.15
-
-
 def _copy_glyph_from_donor(
     donor: TTFont,
     char: str,
