@@ -14,10 +14,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-try:
-    import pdf_ops
-except ImportError:
-    sys.exit("pdf_ops module not found. Ensure pdf_ops.py is in the same directory.")
+import pdf_lib
 
 try:
     import ollama
@@ -59,16 +56,21 @@ Rules:
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
-    """Extract all text from a PDF using pdfminer via pdf_ops."""
+    """Extract all text from a PDF using the pure-Python pdf_lib."""
     try:
-        page_texts = pdf_ops.extract_text(pdf_path)
+        doc = pdf_lib.PDFDocument.open(pdf_path)
     except Exception as exc:
         sys.exit(f"Failed to open PDF '{pdf_path}': {exc}")
 
-    if not page_texts:
+    pages = []
+    for page_num, text in enumerate(doc.extract_text(), start=1):
+        if text.strip():
+            pages.append(f"[Page {page_num}]\n{text}")
+
+    if not pages:
         sys.exit("No extractable text found in the PDF.")
 
-    return "\n\n".join(f"[Page {num}]\n{text}" for num, text in page_texts)
+    return "\n\n".join(pages)
 
 
 def chunk_text(text: str, chunk_size: int) -> list[str]:
@@ -145,6 +147,39 @@ def query_ollama(text_chunk: str, model: str) -> list[dict]:
         return []
 
 
+def mask_pii_value(value: str) -> str:
+    """Replace each digit with '0' and each letter with 'X', keeping other chars."""
+    return "".join(
+        "0" if ch.isdigit() else "X" if ch.isalpha() else ch
+        for ch in value
+    )
+
+
+def scrub_pdf(pdf_path: str, pii_values: list[str], output_path: str) -> None:
+    """Generate a new PDF with PII text replaced byte-for-byte in content streams.
+
+    Text is re-encoded via the same font that rendered the original, so the
+    replacement keeps the document's visual styling automatically. Font-matched
+    glyph-width highlighting is not supported in this pure-Python path.
+    """
+    doc = pdf_lib.PDFDocument.open(pdf_path)
+
+    # Sort longest first so "John Smith" is matched before "John".
+    sorted_pii = sorted(pii_values, key=len, reverse=True)
+    replacements_map = {p: mask_pii_value(p) for p in sorted_pii}
+
+    def mask_fn(text: str) -> str | None:
+        if not text:
+            return None
+        new = text
+        for pii in sorted_pii:
+            if pii in new:
+                new = new.replace(pii, replacements_map[pii])
+        return new if new != text else None
+
+    count = doc.scrub(mask_fn)
+    doc.save(output_path)
+    print(f"  Replaced {count} PII token(s) in content streams.", file=sys.stderr)
 
 
 def aggregate_results(all_items: list[dict]) -> dict:
@@ -253,7 +288,7 @@ def main():
         pdf_path = Path(args.pdf)
         scrubbed_path = str(pdf_path.with_stem(pdf_path.stem + "_scrubbed"))
         print(f"Scrubbing PDF...", file=sys.stderr)
-        pdf_ops.scrub_pdf(args.pdf, sorted(all_pii_values), scrubbed_path)
+        scrub_pdf(args.pdf, sorted(all_pii_values), scrubbed_path)
         print(f"Scrubbed PDF saved to: {scrubbed_path}", file=sys.stderr)
 
 
