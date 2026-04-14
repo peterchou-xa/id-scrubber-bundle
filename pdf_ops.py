@@ -12,6 +12,7 @@ import platform
 import re
 import struct
 import sys
+from decimal import Decimal
 from io import BytesIO
 
 import pikepdf
@@ -836,6 +837,13 @@ def _build_page_codecs(page: pikepdf.Page) -> dict[str, FontCodec]:
 
 SCRUB_DEBUG = os.environ.get("SCRUB_DEBUG") == "1"
 
+# When True, compute mask rectangles by simulating text-state during the
+# content-stream rewrite, bypassing the pdfminer-based locate pass. This is
+# more reliable (no font-fallback drift, no mask-string search) but relies on
+# correct Tm/Td/Tf tracking. Set to False to fall back to the original
+# pdfminer locate path.
+USE_INLINE_HIGHLIGHT = os.environ.get("USE_INLINE_HIGHLIGHT", "1") == "1"
+
 
 def _find_pii_match(decoded: str, pii: str, start: int) -> tuple[int, int] | None:
     """Find *pii* in *decoded* starting at *start*, tolerating extra whitespace.
@@ -1097,6 +1105,223 @@ def _pii_rects_from_pdfminer(
     return page_rects
 
 
+def _mat_mul(a: tuple, b: tuple) -> tuple:
+    """Multiply two 2x3 affine matrices (a, b, c, d, e, f)."""
+    a1, b1, c1, d1, e1, f1 = a
+    a2, b2, c2, d2, e2, f2 = b
+    return (
+        a1 * a2 + b1 * c2,
+        a1 * b2 + b1 * d2,
+        c1 * a2 + d1 * c2,
+        c1 * b2 + d1 * d2,
+        e1 * a2 + f1 * c2 + e2,
+        e1 * b2 + f1 * d2 + f2,
+    )
+
+
+def _inject_inline_highlights(
+    orig_instructions: list,
+    new_instructions: list,
+    codecs: dict,
+) -> list:
+    """Return a rewritten instruction list that paints every modified Tj/TJ
+    in red by wrapping it with q / 1 0 0 rg / <Tj> / Q. Uses the graphics-state
+    stack so the surrounding fill color is preserved.
+    """
+    assert len(orig_instructions) == len(new_instructions)
+    out: list = []
+
+    for idx, (operands, operator) in enumerate(new_instructions):
+        op = str(operator)
+
+        if op in ("Tj", "TJ"):
+            orig_ops, orig_op = orig_instructions[idx]
+            modified = False
+            if str(orig_op) != op:
+                modified = True
+            elif op == "Tj":
+                modified = bytes(operands[0]) != bytes(orig_ops[0])
+            elif op == "TJ":
+                for e_new, e_orig in zip(operands[0], orig_ops[0]):
+                    if isinstance(e_new, pikepdf.String) and isinstance(e_orig, pikepdf.String):
+                        if bytes(e_new) != bytes(e_orig):
+                            modified = True
+                            break
+
+            if modified:
+                out.append(pikepdf.ContentStreamInstruction([], pikepdf.Operator("q")))
+                out.append(pikepdf.ContentStreamInstruction(
+                    [Decimal("1"), Decimal("0"), Decimal("0")],
+                    pikepdf.Operator("rg"),
+                ))
+                out.append(pikepdf.ContentStreamInstruction(operands, operator))
+                out.append(pikepdf.ContentStreamInstruction([], pikepdf.Operator("Q")))
+                continue
+
+        out.append(pikepdf.ContentStreamInstruction(operands, operator))
+
+    return out
+
+
+def _compute_modified_rects(
+    orig_instructions: list,
+    new_instructions: list,
+    codecs: dict,
+) -> list[tuple[float, float, float, float]]:
+    """Walk the rewritten instruction stream with text-state simulation and
+    return rects (x1, y1, x2, y2) in user space for every Tj/TJ segment whose
+    bytes differ from the corresponding original instruction — i.e. the spans
+    we just masked.
+
+    This replaces the pdfminer locate pass: we know where glyphs land because
+    we simulate the same math the PDF viewer does.
+    """
+    assert len(orig_instructions) == len(new_instructions)
+
+    rects: list[tuple[float, float, float, float]] = []
+
+    # Graphics state matrix (CTM) stack, initialized to identity.
+    ctm_stack: list[tuple] = [(1.0, 0.0, 0.0, 1.0, 0.0, 0.0)]
+    # Text matrix Tm and line matrix Tlm, reset on BT.
+    tm: tuple = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    tlm: tuple = tm
+    # Current font and size.
+    cur_font: str | None = None
+    font_size: float = 0.0
+    # Text leading (TL), char spacing (Tc), word spacing (Tw), horizontal scale (Tz/100).
+    leading = 0.0
+    tc = 0.0
+    tw = 0.0
+    th = 1.0
+
+    def current_transform() -> tuple:
+        return _mat_mul(tm, ctm_stack[-1])
+
+    def advance_text_matrix(advance_text_units: float) -> None:
+        """Advance tm by a horizontal offset in text-space units (unscaled)."""
+        nonlocal tm
+        dx = advance_text_units
+        # Text space: translate by (dx * th, 0) in unscaled units then apply font size? Actually
+        # glyph advance in rendered units is adv = width/1000 * font_size * th + tc (+ tw for space).
+        # To advance Tm, translate by (adv, 0) — but Tm is unscaled by font size; advance is in
+        # text-space units matching the matrix directly.
+        tm = _mat_mul((1.0, 0.0, 0.0, 1.0, dx, 0.0), tm)
+
+    def seg_width(raw: bytes, codec: FontCodec) -> float:
+        """Rendered width in text-space units of a byte segment."""
+        units = codec.glyph_width_sum(raw) / 1000.0 * font_size * th
+        # Add char/word spacing per glyph. Count glyphs:
+        n_glyphs = len(raw) // codec.byte_width if codec.byte_width == 2 else len(raw)
+        units += n_glyphs * tc * th
+        # Word spacing applies to space (0x20) glyphs only — approximate if needed.
+        if codec.byte_width == 1:
+            n_spaces = raw.count(b" ")
+            units += n_spaces * tw * th
+        return units
+
+    for idx, (operands, operator) in enumerate(new_instructions):
+        op = str(operator)
+
+        if op == "q":
+            ctm_stack.append(ctm_stack[-1])
+        elif op == "Q":
+            if len(ctm_stack) > 1:
+                ctm_stack.pop()
+        elif op == "cm" and len(operands) >= 6:
+            m = tuple(float(x) for x in operands[:6])
+            ctm_stack[-1] = _mat_mul(m, ctm_stack[-1])
+        elif op == "BT":
+            tm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            tlm = tm
+        elif op == "Tf" and len(operands) >= 2:
+            cur_font = str(operands[0])
+            font_size = float(operands[1])
+        elif op == "TL" and len(operands) >= 1:
+            leading = float(operands[0])
+        elif op == "Tc" and len(operands) >= 1:
+            tc = float(operands[0])
+        elif op == "Tw" and len(operands) >= 1:
+            tw = float(operands[0])
+        elif op == "Tz" and len(operands) >= 1:
+            th = float(operands[0]) / 100.0
+        elif op == "Td" and len(operands) >= 2:
+            tx, ty = float(operands[0]), float(operands[1])
+            tlm = _mat_mul((1.0, 0.0, 0.0, 1.0, tx, ty), tlm)
+            tm = tlm
+        elif op == "TD" and len(operands) >= 2:
+            tx, ty = float(operands[0]), float(operands[1])
+            leading = -ty
+            tlm = _mat_mul((1.0, 0.0, 0.0, 1.0, tx, ty), tlm)
+            tm = tlm
+        elif op == "Tm" and len(operands) >= 6:
+            tm = tuple(float(x) for x in operands[:6])
+            tlm = tm
+        elif op == "T*":
+            tlm = _mat_mul((1.0, 0.0, 0.0, 1.0, 0.0, -leading), tlm)
+            tm = tlm
+        elif op in ("Tj", "TJ", "'", '"'):
+            codec = codecs.get(cur_font) if cur_font else None
+            if not codec:
+                continue
+
+            # Determine if this Tj/TJ was modified vs the original
+            orig_ops, orig_op = orig_instructions[idx]
+            modified = False
+            if str(orig_op) != op:
+                modified = True
+            elif op == "Tj":
+                modified = bytes(operands[0]) != bytes(orig_ops[0])
+            elif op == "TJ":
+                # Compare element-wise
+                for e_new, e_orig in zip(operands[0], orig_ops[0]):
+                    if isinstance(e_new, pikepdf.String) and isinstance(e_orig, pikepdf.String):
+                        if bytes(e_new) != bytes(e_orig):
+                            modified = True
+                            break
+
+            # Compute rect spanning this instruction's glyph run before advancing tm.
+            # Start position in user space:
+            x1_t, y1_t = 0.0, 0.0  # in text space (relative to Tm)
+            # We want: user_pos = text_pos applied to (tm · ctm). Glyph origin at tm · ctm · (0,0).
+            trans = current_transform()
+            x1 = trans[4]
+            y1 = trans[5]
+
+            # Walk each sub-segment to advance tm and get width. For TJ, numeric
+            # elements shift the cursor backwards (in thousandths of em).
+            total_width = 0.0
+            if op == "Tj":
+                raw = bytes(operands[0])
+                total_width = seg_width(raw, codec)
+                advance_text_matrix(total_width)
+            elif op == "TJ":
+                for elem in operands[0]:
+                    if isinstance(elem, pikepdf.String):
+                        raw = bytes(elem)
+                        w = seg_width(raw, codec)
+                        advance_text_matrix(w)
+                        total_width += w
+                    else:
+                        # Number: shift of -n/1000 * font_size * th in text units
+                        shift = -float(elem) / 1000.0 * font_size * th
+                        advance_text_matrix(shift)
+                        total_width += shift
+
+            if modified and total_width > 0:
+                # End position after advancing
+                trans2 = current_transform()
+                x2 = trans2[4]
+                y2 = y1 + font_size * trans[3]  # rough height from CTM y-scale
+                # Normalize
+                xa, xb = (x1, x2) if x1 <= x2 else (x2, x1)
+                ya, yb = (y1, y2) if y1 <= y2 else (y2, y1)
+                # Expand vertically a bit for readability
+                pad = font_size * 0.15
+                rects.append((xa - 1, ya - pad, xb + 1, yb + pad))
+
+    return rects
+
+
 def _add_replacement_annotation(
     page: pikepdf.Page,
     pdf: pikepdf.Pdf,
@@ -1152,6 +1377,8 @@ def scrub_pdf(
 
     pdf = pikepdf.open(pdf_path)
     modified_pages: set[int] = set()
+    # Per-page (orig_instructions, new_instructions, codecs) for inline rect computation.
+    page_instr_cache: dict[int, tuple[list, list, dict]] = {}
 
     # Pass 1: replace content streams.
     for page_idx, page in enumerate(pdf.pages):
@@ -1224,28 +1451,52 @@ def scrub_pdf(
             new_stream = pikepdf.unparse_content_stream(new_instructions)
             page.Contents = pdf.make_stream(new_stream)
             modified_pages.add(page_num)
+            page_instr_cache[page_num] = (instructions, new_instructions, codecs)
 
     if not modified_pages:
         pdf.save(output_path)
         pdf.close()
         return
 
-    # Pass 2: locate the rendered mask strings in the modified content.
-    # Save to an in-memory buffer so pdfminer reads the replaced glyphs,
-    # giving us the actual painted width of e.g. "XXXXX" (wider than the
-    # original lowercase letters they replaced).
-    buf = BytesIO()
-    pdf.save(buf)
-    buf.seek(0)
-    mask_rects = _pii_rects_from_pdfminer(buf, mask_values)
-
-    # Pass 3: add annotations using the mask-text bounding boxes.
-    for page_idx, page in enumerate(pdf.pages):
-        page_num = page_idx + 1
-        if page_num not in modified_pages:
-            continue
-        for rect in mask_rects.get(page_num, []):
-            _add_replacement_annotation(page, pdf, rect)
+    if USE_INLINE_HIGHLIGHT:
+        # New path: rewrite each modified page's content stream to paint a
+        # filled rectangle immediately before each masked Tj/TJ, inline in
+        # the content stream. No annotations, no pdfminer pass.
+        for page_idx, page in enumerate(pdf.pages):
+            page_num = page_idx + 1
+            if page_num not in page_instr_cache:
+                continue
+            orig, new, codecs = page_instr_cache[page_num]
+            with_bg = _inject_inline_highlights(orig, new, codecs)
+            page.Contents = pdf.make_stream(pikepdf.unparse_content_stream(with_bg))
+    else:
+        # Original path (kept for easy revert).
+        # Pass 2: locate the rendered mask strings in the modified content.
+        # Save to an in-memory buffer so pdfminer reads the replaced glyphs,
+        # giving us the actual painted width of e.g. "XXXXX" (wider than the
+        # original lowercase letters they replaced).
+        # buf = BytesIO()
+        # pdf.save(buf)
+        # buf.seek(0)
+        # mask_rects = _pii_rects_from_pdfminer(buf, mask_values)
+        #
+        # # Pass 3: add annotations using the mask-text bounding boxes.
+        # for page_idx, page in enumerate(pdf.pages):
+        #     page_num = page_idx + 1
+        #     if page_num not in modified_pages:
+        #         continue
+        #     for rect in mask_rects.get(page_num, []):
+        #         _add_replacement_annotation(page, pdf, rect)
+        buf = BytesIO()
+        pdf.save(buf)
+        buf.seek(0)
+        mask_rects = _pii_rects_from_pdfminer(buf, mask_values)
+        for page_idx, page in enumerate(pdf.pages):
+            page_num = page_idx + 1
+            if page_num not in modified_pages:
+                continue
+            for rect in mask_rects.get(page_num, []):
+                _add_replacement_annotation(page, pdf, rect)
 
     pdf.save(output_path)
     pdf.close()
