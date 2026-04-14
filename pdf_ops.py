@@ -944,12 +944,16 @@ def _pii_rects_from_pdfminer(
                         start = idx + 1
                         continue
                     span = chars[idx:end]
-                    rects.append((
-                        min(c[1][0] for c in span),
-                        min(c[1][1] for c in span),
-                        max(c[1][2] for c in span),
-                        max(c[1][3] for c in span),
-                    ))
+                    x0 = min(c[1][0] for c in span)
+                    y0 = min(c[1][1] for c in span)
+                    x1 = max(c[1][2] for c in span)
+                    y1 = max(c[1][3] for c in span)
+                    # pdfminer bbox runs from font descent to ascent; mask chars
+                    # ("X", digits) have no descender, so the bbox sits ~15% too
+                    # low at the bottom. Trim the descender slack so the box
+                    # hugs the visible glyph band.
+                    y0 += (y1 - y0) * 0.15
+                    rects.append((x0, y0, x1, y1))
                     for i in range(idx, end):
                         claimed[i] = True
                     start = end
