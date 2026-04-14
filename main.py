@@ -147,11 +147,26 @@ def query_ollama(text_chunk: str, model: str) -> list[dict]:
 
 
 
-def aggregate_results(all_items: list[dict]) -> dict:
-    """Aggregate detected PII into counts and samples per category."""
-    counts: dict[str, int] = defaultdict(int)
-    samples: dict[str, list[str]] = defaultdict(list)
-    seen: dict[str, set] = defaultdict(set)
+def filter_pii_values(values: set[str]) -> set[str]:
+    """Drop single letters and values subsumed by a longer detected value.
+
+    An LLM will sometimes surface a middle initial ('E') or a state abbreviation
+    ('PA') that's already covered by a richer detection ('PITTSBURGH, PA 15260').
+    Scrubbing those short tokens standalone would blast unrelated text.
+    """
+    filtered = {v for v in values if len(v) >= 2}
+    sorted_vals = sorted(filtered, key=len, reverse=True)
+    result: set[str] = set()
+    for v in sorted_vals:
+        if any(v != longer and v in longer for longer in result):
+            continue
+        result.add(v)
+    return result
+
+
+def aggregate_results(all_items: list[dict]) -> list[dict]:
+    """Aggregate detected PII into a flat list of unique values with types."""
+    seen: dict[tuple[str, str], int] = defaultdict(int)  # (type, value) -> count
 
     for item in all_items:
         pii_type = item.get("type", "other_pii").strip().lower()
@@ -160,26 +175,19 @@ def aggregate_results(all_items: list[dict]) -> dict:
         if not value:
             continue
 
-        # Normalise unknown types
         if pii_type not in PII_CATEGORIES:
             pii_type = "other_pii"
 
-        # De-duplicate identical value per type
-        if value not in seen[pii_type]:
-            seen[pii_type].add(value)
-            counts[pii_type] += 1
-            if len(samples[pii_type]) < 3:
-                samples[pii_type].append(value)
+        seen[(pii_type, value)] += 1
 
-    result = {}
-    for pii_type in PII_CATEGORIES:
-        if counts[pii_type]:
-            result[pii_type] = {
-                "occurrences": counts[pii_type],
-                "examples": samples[pii_type],
-            }
-
-    return result
+    # Sort by category order then value
+    cat_order = {c: i for i, c in enumerate(PII_CATEGORIES)}
+    return [
+        {"value": value, "type": pii_type, "occurrences": count}
+        for (pii_type, value), count in sorted(
+            seen.items(), key=lambda x: (cat_order.get(x[0][0], 99), x[0][1])
+        )
+    ]
 
 
 def main():
@@ -212,6 +220,7 @@ def main():
 
     print(f"Extracting text from: {args.pdf}", file=sys.stderr)
     full_text = extract_text_from_pdf(args.pdf)
+    print(full_text)
     print(f"Extracted {len(full_text):,} characters.", file=sys.stderr)
 
     chunks = chunk_text(full_text, args.chunk_size)
@@ -231,13 +240,15 @@ def main():
         if isinstance(item.get("value"), str) and item["value"].strip()
     }
 
-    summary = aggregate_results(all_items)
+    all_pii_values = filter_pii_values(all_pii_values)
+
+    pii_list = aggregate_results(all_items)
 
     output = {
         "file": args.pdf,
         "model": args.model,
-        "total_pii_types_detected": len(summary),
-        "pii_summary": summary,
+        "total_pii_detected": len(pii_list),
+        "pii": pii_list,
     }
 
     json_output = json.dumps(output, indent=2, ensure_ascii=False)
@@ -253,6 +264,9 @@ def main():
         pdf_path = Path(args.pdf)
         scrubbed_path = str(pdf_path.with_stem(pdf_path.stem + "_scrubbed"))
         print(f"Scrubbing PDF...", file=sys.stderr)
+        print(f"PII values to scrub ({len(all_pii_values)}):", file=sys.stderr)
+        for v in sorted(all_pii_values, key=len, reverse=True):
+            print(f"  {repr(v)}", file=sys.stderr)
         pdf_ops.scrub_pdf(args.pdf, sorted(all_pii_values), scrubbed_path)
         print(f"Scrubbed PDF saved to: {scrubbed_path}", file=sys.stderr)
 

@@ -11,6 +11,7 @@ import os
 import platform
 import re
 import struct
+import sys
 from io import BytesIO
 
 import pikepdf
@@ -313,10 +314,12 @@ class FontCodec:
         if self.byte_width == 2:
             for i in range(0, len(raw) - 1, 2):
                 cid = struct.unpack(">H", raw[i : i + 2])[0]
-                chars.append(chr(self.cid_to_uni.get(cid, 0xFFFD)))
+                code = self.cid_to_uni.get(cid, 0xFFFD)
+                chars.append(chr(code) if 0 <= code < 0x110000 else "\uFFFD")
             return "".join(chars)
         for b in raw:
-            chars.append(chr(self.cid_to_uni.get(b, b)))
+            code = self.cid_to_uni.get(b, b)
+            chars.append(chr(code) if 0 <= code < 0x110000 else "\uFFFD")
         return "".join(chars)
 
     def encode(self, text: str) -> bytes:
@@ -831,65 +834,195 @@ def _build_page_codecs(page: pikepdf.Page) -> dict[str, FontCodec]:
     return codecs
 
 
+SCRUB_DEBUG = os.environ.get("SCRUB_DEBUG") == "1"
+
+
+def _find_pii_match(decoded: str, pii: str, start: int) -> tuple[int, int] | None:
+    """Find *pii* in *decoded* starting at *start*, tolerating extra whitespace.
+
+    Returns (match_start, match_end) in *decoded*, or None. PDFs often encode
+    inter-word spaces via positioning operators rather than space glyphs, so
+    the decoded run may contain "UNIVERSITYOFPITTSBURGH" for source text
+    "UNIVERSITY OF PITTSBURGH". Conversely, a run may contain *extra* spaces
+    ("ELIZABETH  A  DARLING"). We match character-by-character, skipping
+    whitespace on either side when the pii has a space.
+    """
+    n = len(decoded)
+    for i in range(start, n):
+        j = i  # cursor in decoded
+        k = 0  # cursor in pii
+        while k < len(pii) and j < n:
+            pc = pii[k]
+            dc = decoded[j]
+            if pc == " ":
+                # pii expects a space — consume any run of whitespace in decoded (including zero)
+                while j < n and decoded[j].isspace():
+                    j += 1
+                k += 1
+                continue
+            if dc.isspace():
+                # decoded has a space where pii has none — skip it
+                j += 1
+                continue
+            if pc != dc:
+                break
+            j += 1
+            k += 1
+        if k == len(pii):
+            return i, j
+    return None
+
+
 def _replace_pii(decoded: str, pii_values: list[str]) -> str | None:
-    """Replace PII in decoded text. Returns None if no match."""
-    result = decoded
+    """Replace PII in decoded text, tolerating whitespace differences.
+
+    Returns None if no match. Matched characters are replaced with their mask
+    equivalent; whitespace within a match is preserved (space → space under
+    mask_pii_value anyway, so this is a no-op semantically).
+    """
+    chars = list(decoded)
     changed = False
+    matched: list[str] = []
+
     for pii in pii_values:
-        if pii in result:
-            result = result.replace(pii, mask_pii_value(pii))
+        start = 0
+        while start < len(chars):
+            m = _find_pii_match("".join(chars), pii, start)
+            if m is None:
+                break
+            ms, me = m
+            for idx in range(ms, me):
+                chars[idx] = (
+                    "0" if chars[idx].isdigit()
+                    else "X" if chars[idx].isalpha()
+                    else chars[idx]
+                )
+            if not changed or pii not in matched:
+                matched.append(pii)
             changed = True
+            start = me
+
+    result = "".join(chars)
+    if SCRUB_DEBUG:
+        preview = decoded if len(decoded) < 120 else decoded[:117] + "..."
+        if changed:
+            print(f"[scrub] MATCH  run={preview!r}  hit={matched}", file=sys.stderr)
+        else:
+            if decoded.strip() and any(c.isalpha() for c in decoded):
+                print(f"[scrub] no-match run={preview!r}", file=sys.stderr)
     return result if changed else None
 
 
-def _try_replace_string(
-    operand: pikepdf.String,
-    codec: FontCodec,
-    pii_values: list[str],
-) -> pikepdf.String | None:
-    """Try to replace PII in a single text string. Returns None if unchanged."""
-    raw = bytes(operand)
-    decoded = codec.decode(raw)
-    replaced = _replace_pii(decoded, pii_values)
-    if replaced is None:
-        return None
-    return pikepdf.String(codec.encode(replaced))
-
-
-def _try_replace_tj_array(
-    arr: pikepdf.Array,
+def _try_replace_run(
+    run: list[tuple],
     codec: FontCodec,
     pii_values: list[str],
 ) -> list | None:
-    """Replace PII across a TJ array, handling text that spans multiple elements.
+    """Replace PII across a run of consecutive Tj/TJ instructions (same font).
 
-    Returns a new array if changes were made, None otherwise.
+    Each entry in *run* is an (operands, operator) pair.  All string segments
+    across every instruction are concatenated, PII is matched on the full text,
+    and replacements are distributed back to the individual segments.  This
+    handles PII values that span multiple instructions (e.g. a number in one Tj
+    followed by a code letter in the next).
+
+    Returns a list of new ContentStreamInstruction objects if any replacement
+    was made, else None.
     """
-    # Decode all string elements and track their positions in the concatenated text
-    segments: list[tuple[int, str, int]] = []  # (arr_idx, decoded_text, char_count)
-    full_text_parts: list[str] = []
-    for idx, item in enumerate(arr):
-        if isinstance(item, pikepdf.String):
-            decoded = codec.decode(bytes(item))
-            segments.append((idx, decoded, len(decoded)))
-            full_text_parts.append(decoded)
+    # Decode every string segment and record its location. Non-text-showing
+    # operators (Td, TD, T*, Tm, TL, Ts) between text segments are treated as
+    # an implicit single space in full_text so PII values spanning a
+    # positioning move still match; those synthetic spaces have no seg_map
+    # entry and are therefore not written back anywhere.
+    text_ops = {"Tj", "TJ"}
+    seg_map: list[tuple[int, int | None, str]] = []
+    full_parts: list[str] = []
+    prev_was_text = False
 
-    full_text = "".join(full_text_parts)
+    for item_idx, (operands, operator) in enumerate(run):
+        op = str(operator)
+        if op == "Tj":
+            if prev_was_text is False and full_parts:
+                full_parts.append(" ")  # synthetic gap (no seg_map entry)
+            decoded = codec.decode(bytes(operands[0]))
+            seg_map.append((item_idx, None, decoded))
+            full_parts.append(decoded)
+            prev_was_text = True
+        elif op == "TJ":
+            if prev_was_text is False and full_parts:
+                full_parts.append(" ")
+            for elem_idx, elem in enumerate(operands[0]):
+                if isinstance(elem, pikepdf.String):
+                    decoded = codec.decode(bytes(elem))
+                    seg_map.append((item_idx, elem_idx, decoded))
+                    full_parts.append(decoded)
+            prev_was_text = True
+        else:
+            # positioning op — synthesized space handled on next text op
+            prev_was_text = False
 
-    # Check for PII in the concatenated text
+    full_text = "".join(full_parts)
     replaced = _replace_pii(full_text, pii_values)
     if replaced is None:
         return None
 
-    # Distribute the replaced text back to individual segments
-    new_arr = list(arr)
+    # Distribute replaced chars back to segments. Build a parallel list
+    # `origin` where each entry is the seg_map key for that full_parts slot,
+    # or None for synthetic gap spaces (which are discarded).
+    new_seg: dict[tuple[int, int | None], str] = {}
     offset = 0
-    for arr_idx, original, char_count in segments:
-        segment_replaced = replaced[offset : offset + char_count]
-        offset += char_count
-        new_arr[arr_idx] = pikepdf.String(codec.encode(segment_replaced))
+    origin: list[tuple[int, int | None] | None] = []
+    prev_was_text = False
+    for item_idx, (operands, operator) in enumerate(run):
+        op = str(operator)
+        if op in text_ops:
+            if prev_was_text is False and origin:
+                origin.append(None)  # synthetic gap
+            if op == "Tj":
+                origin.append((item_idx, None))
+            else:
+                for elem_idx, elem in enumerate(operands[0]):
+                    if isinstance(elem, pikepdf.String):
+                        origin.append((item_idx, elem_idx))
+            prev_was_text = True
+        else:
+            prev_was_text = False
 
-    return new_arr
+    assert len(origin) == len(full_parts)
+    for part, key in zip(full_parts, origin):
+        length = len(part)
+        if key is not None:
+            new_seg[key] = replaced[offset : offset + length]
+        offset += length
+
+    # Rebuild instruction objects (positioning ops passed through unchanged)
+    result: list = []
+    for item_idx, (operands, operator) in enumerate(run):
+        op = str(operator)
+        if op == "Tj":
+            new_str = new_seg[(item_idx, None)]
+            result.append(
+                pikepdf.ContentStreamInstruction(
+                    pikepdf._core._ObjectList([pikepdf.String(codec.encode(new_str))]),
+                    operator,
+                )
+            )
+        elif op == "TJ":
+            new_arr = list(operands[0])
+            for elem_idx, elem in enumerate(operands[0]):
+                if isinstance(elem, pikepdf.String):
+                    new_arr[elem_idx] = pikepdf.String(
+                        codec.encode(new_seg[(item_idx, elem_idx)])
+                    )
+            result.append(
+                pikepdf.ContentStreamInstruction(
+                    pikepdf._core._ObjectList([pikepdf.Array(new_arr)]),
+                    operator,
+                )
+            )
+        else:
+            result.append(pikepdf.ContentStreamInstruction(operands, operator))
+    return result
 
 
 def _pii_rects_from_pdfminer(
@@ -1029,12 +1162,14 @@ def scrub_pdf(
             continue
 
         page.contents_coalesce()
-        instructions = pikepdf.parse_content_stream(page)
+        instructions = list(pikepdf.parse_content_stream(page))
         new_instructions: list = []
         current_font: str | None = None
         modified = False
 
-        for operands, operator in instructions:
+        i = 0
+        while i < len(instructions):
+            operands, operator = instructions[i]
             op = str(operator)
 
             # Track font: <font_name> <size> Tf
@@ -1043,34 +1178,47 @@ def scrub_pdf(
 
             codec = codecs.get(current_font) if current_font else None
 
-            # Tj — single string
-            if op == "Tj" and codec:
-                result = _try_replace_string(operands[0], codec, pii_values)
-                if result is not None:
-                    new_instructions.append(
-                        pikepdf.ContentStreamInstruction(
-                            pikepdf._core._ObjectList([result]), operator
-                        )
-                    )
+            # Collect a run of Tj/TJ instructions, allowing text-positioning
+            # operators (Td, TD, T*, Tm, TL, Ts) between them. PDFs often emit
+            # a space between words as a positioning move rather than an actual
+            # space glyph, so "ELIZABETH  A  DARLING" can appear as
+            # Tj("ELIZABETH") Td Tj("A") Td Tj("DARLING") — we must treat the
+            # whole sequence as one run to match across the gaps.
+            if op in ("Tj", "TJ") and codec:
+                text_ops = {"Tj", "TJ"}
+                pos_ops = {"Td", "TD", "T*", "Tm", "TL", "Ts", "Tw", "Tc", "Tz", "Tr"}
+                j = i
+                while j < len(instructions):
+                    next_op = str(instructions[j][1])
+                    if next_op in text_ops:
+                        j += 1
+                        continue
+                    if next_op in pos_ops:
+                        # Only keep extending if another Tj/TJ follows
+                        k = j + 1
+                        while k < len(instructions) and str(instructions[k][1]) in pos_ops:
+                            k += 1
+                        if k < len(instructions) and str(instructions[k][1]) in text_ops:
+                            j = k
+                            continue
+                    break
+                run = instructions[i:j]
+                replaced_run = _try_replace_run(run, codec, pii_values)
+                if replaced_run is not None:
+                    new_instructions.extend(replaced_run)
                     modified = True
-                    continue
-
-            # TJ — array of strings and kerning numbers
-            if op == "TJ" and codec:
-                new_arr = _try_replace_tj_array(operands[0], codec, pii_values)
-                if new_arr is not None:
-                    new_instructions.append(
-                        pikepdf.ContentStreamInstruction(
-                            pikepdf._core._ObjectList([pikepdf.Array(new_arr)]),
-                            operator,
+                else:
+                    for instr_operands, instr_operator in run:
+                        new_instructions.append(
+                            pikepdf.ContentStreamInstruction(instr_operands, instr_operator)
                         )
-                    )
-                    modified = True
-                    continue
+                i = j
+                continue
 
             new_instructions.append(
                 pikepdf.ContentStreamInstruction(operands, operator)
             )
+            i += 1
 
         if modified:
             new_stream = pikepdf.unparse_content_stream(new_instructions)
