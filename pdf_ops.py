@@ -16,7 +16,7 @@ from io import BytesIO
 import pikepdf
 from fontTools.ttLib import TTFont
 from pdfminer.high_level import extract_pages
-from pdfminer.layout import LTTextContainer
+from pdfminer.layout import LTChar, LTTextBox, LTTextLine, LTTextContainer
 
 
 # ── System font discovery ──────────────────────────────────────────
@@ -293,16 +293,20 @@ def _parse_tounicode_cmap(cmap_bytes: bytes) -> dict[int, int]:
 class FontCodec:
     """Bidirectional byte ↔ Unicode mapping for a single PDF font."""
 
-    __slots__ = ("cid_to_uni", "uni_to_cid", "byte_width")
+    __slots__ = ("cid_to_uni", "uni_to_cid", "byte_width", "cid_to_width", "default_width")
 
     def __init__(
         self,
         cid_to_uni: dict[int, int],
         byte_width: int,  # 1 for single-byte fonts, 2 for CID/Identity-H
+        cid_to_width: dict[int, int] | None = None,
+        default_width: int = 1000,
     ):
         self.cid_to_uni = cid_to_uni
         self.uni_to_cid = {v: k for k, v in cid_to_uni.items()}
         self.byte_width = byte_width
+        self.cid_to_width: dict[int, int] = cid_to_width or {}
+        self.default_width = default_width
 
     def decode(self, raw: bytes) -> str:
         chars: list[str] = []
@@ -327,6 +331,93 @@ class FontCodec:
                 parts.append(bytes([cid & 0xFF]))
         return b"".join(parts)
 
+    def glyph_width_sum(self, raw: bytes) -> float:
+        """Return the total advance width in font units (1/1000 em) for *raw* bytes."""
+        total = 0.0
+        if self.byte_width == 2:
+            for i in range(0, len(raw) - 1, 2):
+                cid = struct.unpack(">H", raw[i : i + 2])[0]
+                total += self.cid_to_width.get(cid, self.default_width)
+        else:
+            for b in raw:
+                total += self.cid_to_width.get(b, self.default_width)
+        return total
+
+
+def _parse_w_array(w_array: pikepdf.Array, out: dict[int, int]) -> None:
+    """Parse a CID font /W array into a {cid: width} mapping (in-place).
+
+    /W can contain two entry formats:
+      Format 1 – c [w1 w2 …]   : individual widths starting at CID c
+      Format 2 – cfirst clast w : all CIDs cfirst..clast get width w
+    """
+    items = list(w_array)
+    i = 0
+    while i < len(items):
+        first = int(items[i])
+        i += 1
+        if i >= len(items):
+            break
+        if isinstance(items[i], pikepdf.Array):
+            for j, w in enumerate(items[i]):
+                out[first + j] = int(w)
+            i += 1
+        else:
+            last = int(items[i])
+            i += 1
+            if i >= len(items):
+                break
+            w = int(items[i])
+            i += 1
+            for cid in range(first, last + 1):
+                out[cid] = w
+
+
+def _extract_font_widths(font_obj: pikepdf.Object) -> tuple[dict[int, int], int]:
+    """Return ({cid: width}, default_width) for *font_obj*.
+
+    Widths are in PDF font units (1/1000 of the em square).
+    Works for both simple fonts (/Widths array) and Type0/CID fonts (/W array).
+    """
+    subtype = str(font_obj.get("/Subtype", ""))
+    cid_to_width: dict[int, int] = {}
+    default_width = 1000
+
+    if subtype == "/Type0":
+        descendants = font_obj.get("/DescendantFonts")
+        if descendants:
+            try:
+                cid_font = descendants[0]
+                dw = cid_font.get("/DW")
+                if dw is not None:
+                    default_width = int(dw)
+                w_arr = cid_font.get("/W")
+                if w_arr is not None:
+                    _parse_w_array(w_arr, cid_to_width)
+            except Exception:
+                pass
+    else:
+        # Simple font: /FirstChar + /Widths
+        try:
+            first_char = int(font_obj.get("/FirstChar", 0))
+            widths = font_obj.get("/Widths")
+            if widths is not None:
+                for i, w in enumerate(widths):
+                    cid_to_width[first_char + i] = int(w)
+        except Exception:
+            pass
+        # /MissingWidth from /FontDescriptor
+        try:
+            fd = font_obj.get("/FontDescriptor")
+            if fd is not None:
+                mw = fd.get("/MissingWidth")
+                if mw is not None:
+                    default_width = int(mw)
+        except Exception:
+            pass
+
+    return cid_to_width, default_width
+
 
 def _resolve_font_codec(font_obj: pikepdf.Object) -> FontCodec | None:
     """Build a FontCodec from a PDF font object, handling all common encodings."""
@@ -343,13 +434,15 @@ def _resolve_font_codec(font_obj: pikepdf.Object) -> FontCodec | None:
         if "Identity" in enc_str:
             byte_width = 2
 
+    cid_to_width, default_width = _extract_font_widths(font_obj)
+
     # --- Priority 1: ToUnicode CMap (most reliable) ---
     if tounicode is not None:
         try:
             cmap_bytes = tounicode.read_bytes()
             cid_to_uni = _parse_tounicode_cmap(cmap_bytes)
             if cid_to_uni:
-                return FontCodec(cid_to_uni, byte_width)
+                return FontCodec(cid_to_uni, byte_width, cid_to_width, default_width)
         except Exception:
             pass
 
@@ -398,7 +491,7 @@ def _resolve_font_codec(font_obj: pikepdf.Object) -> FontCodec | None:
         # Fallback: identity mapping (Latin-1)
         base_map = {i: i for i in range(256)}
 
-    return FontCodec(base_map, byte_width)
+    return FontCodec(base_map, byte_width, cid_to_width, default_width)
 
 
 # Minimal Adobe glyph name → Unicode mapping for /Differences
@@ -799,19 +892,133 @@ def _try_replace_tj_array(
     return new_arr
 
 
+def _pii_rects_from_pdfminer(
+    pdf_source,  # str path or binary file-like object (e.g. BytesIO)
+    pii_values: list[str],
+) -> dict[int, list[tuple[float, float, float, float]]]:
+    """Return rendered bounding boxes for every occurrence of each value in *pii_values*.
+
+    Uses pdfminer's LTChar objects, which carry the actual painted bbox in PDF
+    page coordinates (y up from bottom-left) — no glyph-metric approximation,
+    and bold / scaled glyphs are measured as rendered.
+
+    *pdf_source* may be a file-system path (str) or any binary file-like object
+    (e.g. a BytesIO produced from a pikepdf save), so the caller can run this
+    against the already-modified content without writing an intermediate file.
+
+    Returns {1-based page_num: [(x0, y0, x1, y1), ...]}.
+    """
+    page_rects: dict[int, list[tuple[float, float, float, float]]] = {}
+
+    sorted_pii = sorted(set(pii_values), key=len, reverse=True)
+
+    for page_num, page_layout in enumerate(extract_pages(pdf_source), start=1):
+        lines: list[list[tuple[str, tuple[float, float, float, float]]]] = []
+        for element in page_layout:
+            if not isinstance(element, LTTextBox):
+                continue
+            for line in element:
+                if not isinstance(line, LTTextLine):
+                    continue
+                line_chars = [
+                    (c.get_text(), c.bbox) for c in line if isinstance(c, LTChar)
+                ]
+                if line_chars:
+                    lines.append(line_chars)
+
+        rects: list[tuple[float, float, float, float]] = []
+
+        for chars in lines:
+            text = "".join(c[0] for c in chars)
+            claimed = [False] * len(text)
+            for pii in sorted_pii:
+                if not pii:
+                    continue
+                start = 0
+                while True:
+                    idx = text.find(pii, start)
+                    if idx < 0:
+                        break
+                    end = idx + len(pii)
+                    if any(claimed[idx:end]):
+                        start = idx + 1
+                        continue
+                    span = chars[idx:end]
+                    rects.append((
+                        min(c[1][0] for c in span),
+                        min(c[1][1] for c in span),
+                        max(c[1][2] for c in span),
+                        max(c[1][3] for c in span),
+                    ))
+                    for i in range(idx, end):
+                        claimed[i] = True
+                    start = end
+
+        if rects:
+            page_rects[page_num] = rects
+
+    return page_rects
+
+
+def _add_replacement_annotation(
+    page: pikepdf.Page,
+    pdf: pikepdf.Pdf,
+    rect: tuple[float, float, float, float],
+) -> None:
+    """Add a semi-transparent red Square annotation around replaced text."""
+    x1, y1, x2, y2 = rect
+
+    annot = pdf.make_indirect(
+        pikepdf.Dictionary(
+            Type=pikepdf.Name("/Annot"),
+            Subtype=pikepdf.Name("/Square"),
+            Rect=pikepdf.Array(
+                [pikepdf.Real(x1), pikepdf.Real(y1), pikepdf.Real(x2), pikepdf.Real(y2)]
+            ),
+            C=pikepdf.Array(                          # darker red border
+                [pikepdf.Real(0.55), pikepdf.Real(0.0), pikepdf.Real(0.0)]
+            ),
+            IC=pikepdf.Array(                         # red interior fill
+                [pikepdf.Real(1.0), pikepdf.Real(0.0), pikepdf.Real(0.0)]
+            ),
+            CA=pikepdf.Real(0.3),                     # 30 % opacity
+            BS=pikepdf.Dictionary(
+                W=pikepdf.Real(1.5),
+                S=pikepdf.Name("/S"),                 # solid border style
+            ),
+            F=pikepdf.Integer(4),                     # Print flag
+        )
+    )
+
+    existing = page.get("/Annots")
+    if existing is None:
+        page["/Annots"] = pikepdf.Array([annot])
+    else:
+        existing.append(annot)
+
+
 def scrub_pdf(
     pdf_path: str, pii_values: list[str], output_path: str
 ) -> None:
     """Generate a new PDF with PII replaced in content streams."""
-    # Collect all unique characters used in mask values
+    from io import BytesIO
+
     mask_chars: set[str] = set()
     for pii in pii_values:
         mask_chars.update(mask_pii_value(pii))
 
-    pdf = pikepdf.open(pdf_path)
+    # The mask strings we need to locate after replacement (e.g. "XXXXX", "000-00-0000").
+    # Use dict.fromkeys to deduplicate while preserving order: two PII values that
+    # produce the same mask (e.g. "John" and "Jane" → "XXXX") must only be searched
+    # once, otherwise every occurrence gets two overlapping annotation boxes.
+    mask_values = list(dict.fromkeys(mask_pii_value(pii) for pii in pii_values))
 
-    for page in pdf.pages:
-        # Expand subset fonts to include mask characters (e.g. 'X') before replacing
+    pdf = pikepdf.open(pdf_path)
+    modified_pages: set[int] = set()
+
+    # Pass 1: replace content streams.
+    for page_idx, page in enumerate(pdf.pages):
+        page_num = page_idx + 1
         _ensure_mask_chars_in_fonts(page, pdf, mask_chars)
         codecs = _build_page_codecs(page)
         if not codecs:
@@ -864,6 +1071,29 @@ def scrub_pdf(
         if modified:
             new_stream = pikepdf.unparse_content_stream(new_instructions)
             page.Contents = pdf.make_stream(new_stream)
+            modified_pages.add(page_num)
+
+    if not modified_pages:
+        pdf.save(output_path)
+        pdf.close()
+        return
+
+    # Pass 2: locate the rendered mask strings in the modified content.
+    # Save to an in-memory buffer so pdfminer reads the replaced glyphs,
+    # giving us the actual painted width of e.g. "XXXXX" (wider than the
+    # original lowercase letters they replaced).
+    buf = BytesIO()
+    pdf.save(buf)
+    buf.seek(0)
+    mask_rects = _pii_rects_from_pdfminer(buf, mask_values)
+
+    # Pass 3: add annotations using the mask-text bounding boxes.
+    for page_idx, page in enumerate(pdf.pages):
+        page_num = page_idx + 1
+        if page_num not in modified_pages:
+            continue
+        for rect in mask_rects.get(page_num, []):
+            _add_replacement_annotation(page, pdf, rect)
 
     pdf.save(output_path)
     pdf.close()
