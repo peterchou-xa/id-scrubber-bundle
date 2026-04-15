@@ -208,6 +208,74 @@ def aggregate_results(all_items: list[dict]) -> list[dict]:
     ]
 
 
+def _run_ocr_scrub(args) -> None:
+    """OCR-based scrub flow: render → OCR → LLM → bbox → redact."""
+    import ocr_scrub
+
+    print(f"Rendering and OCR-ing pages at {args.ocr_dpi} DPI...", file=sys.stderr)
+    pages = ocr_scrub.ocr_pdf(args.pdf, dpi=args.ocr_dpi)
+    print(f"  {len(pages)} page(s), {sum(len(p.words) for p in pages)} word(s) total.", file=sys.stderr)
+
+    full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
+    print(f"OCR extracted {len(full_text):,} characters.", file=sys.stderr)
+
+    chunks = chunk_text(full_text, args.chunk_size)
+    print(f"Processing {len(chunks)} chunk(s) with model '{args.model}'...", file=sys.stderr)
+
+    all_items: list[dict] = []
+    for i, chunk in enumerate(chunks, start=1):
+        print(f"  Chunk {i}/{len(chunks)}...", file=sys.stderr, end=" ")
+        items = query_ollama(chunk, args.model)
+        print(f"{len(items)} PII item(s) found.", file=sys.stderr)
+        all_items.extend(items)
+
+    all_pii_values: set[str] = {
+        item["value"].strip()
+        for item in all_items
+        if isinstance(item.get("value"), str) and item["value"].strip()
+    }
+    all_pii_values.update(parse_custom_pii_values(args.custom_pii))
+    # Don't run filter_pii_values here: in OCR mode each variant needs its
+    # own independent match (e.g., both "51106" and "51106-3639" may appear
+    # on different parts of the page).
+    pii_list_sorted = sorted(all_pii_values)
+
+    pii_list = aggregate_results(all_items)
+    output = {
+        "file": args.pdf,
+        "model": args.model,
+        "total_pii_detected": len(pii_list),
+        "pii": pii_list,
+    }
+    json_output = json.dumps(output, indent=2, ensure_ascii=False)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(json_output)
+        print(f"Results written to: {args.output}", file=sys.stderr)
+    else:
+        print(json_output)
+
+    # Map PII → bboxes per page.
+    page_bboxes: dict[int, list[tuple[float, float, float, float]]] = {}
+    total_bboxes = 0
+    for page in pages:
+        bboxes = ocr_scrub.find_pii_bboxes(page, pii_list_sorted)
+        if bboxes:
+            page_bboxes[page.page_num] = bboxes
+            total_bboxes += len(bboxes)
+
+    print(f"Matched {total_bboxes} PII region(s) across {len(page_bboxes)} page(s).", file=sys.stderr)
+    if not page_bboxes:
+        print("Nothing to redact.", file=sys.stderr)
+        return
+
+    pdf_path = Path(args.pdf)
+    scrubbed_path = str(pdf_path.with_stem(pdf_path.stem + "_scrubbed"))
+    print(f"Redacting PDF...", file=sys.stderr)
+    ocr_scrub.scrub_with_ocr(args.pdf, page_bboxes, pii_list_sorted, scrubbed_path)
+    print(f"Scrubbed PDF saved to: {scrubbed_path}", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Detect PII in a PDF file using Ollama (gemma3).",
@@ -242,7 +310,27 @@ def main():
         action="store_true",
         help="Generate a new PDF with PII replaced (digits→0, letters→X).",
     )
+    parser.add_argument(
+        "--ocr-scrub",
+        action="store_true",
+        help=(
+            "Render each page to an image, OCR it, send the OCR text to the "
+            "LLM for PII detection, then redact by masking overlapping Tj "
+            "operators and overlaying black rectangles. Universal across "
+            "fonts (no ToUnicode dependency)."
+        ),
+    )
+    parser.add_argument(
+        "--ocr-dpi",
+        type=int,
+        default=300,
+        help="DPI used when rendering pages for OCR (only with --ocr-scrub).",
+    )
     args = parser.parse_args()
+
+    if args.ocr_scrub:
+        _run_ocr_scrub(args)
+        return
 
     print(f"Extracting text from: {args.pdf}", file=sys.stderr)
     full_text = extract_text_from_pdf(args.pdf)
