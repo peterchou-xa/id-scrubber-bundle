@@ -164,6 +164,24 @@ def filter_pii_values(values: set[str]) -> set[str]:
     return result
 
 
+def parse_custom_pii_values(raw_values: list[str] | None) -> set[str]:
+    """Parse custom PII values passed on the CLI.
+
+    Supports multiple values after ``--custom-pii`` as well as comma/newline-
+    separated values within a single argument.
+    """
+    if not raw_values:
+        return set()
+
+    values: set[str] = set()
+    for raw in raw_values:
+        for part in re.split(r"[\n,]", raw):
+            value = part.strip()
+            if value:
+                values.add(value)
+    return values
+
+
 def aggregate_results(all_items: list[dict]) -> list[dict]:
     """Aggregate detected PII into a flat list of unique values with types."""
     seen: dict[tuple[str, str], int] = defaultdict(int)  # (type, value) -> count
@@ -212,6 +230,14 @@ def main():
         help="Write JSON result to this file instead of stdout",
     )
     parser.add_argument(
+        "--custom-pii",
+        nargs="+",
+        help=(
+            "Custom PII values to scrub. Pass one or more values after the flag "
+            "when a value may not be detected by Ollama."
+        ),
+    )
+    parser.add_argument(
         "--scrub",
         action="store_true",
         help="Generate a new PDF with PII replaced (digits→0, letters→X).",
@@ -239,6 +265,7 @@ def main():
         for item in all_items
         if isinstance(item.get("value"), str) and item["value"].strip()
     }
+    all_pii_values.update(parse_custom_pii_values(args.custom_pii))
 
     all_pii_values = filter_pii_values(all_pii_values)
 
