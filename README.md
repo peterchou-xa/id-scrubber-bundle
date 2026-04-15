@@ -62,10 +62,16 @@ Scrub the PDF (text-based), writing a new PDF alongside the original:
 python main.py path/to/document.pdf --scrub
 ```
 
-Scrub a scanned/non-Unicode PDF via OCR:
+Scrub a non-Unicode PDF via OCR:
 
 ```bash
 python main.py path/to/document.pdf --ocr-scrub
+```
+
+Run both passes — text-based scrub first, then OCR scrub on the result (useful for mixed PDFs containing both extractable text and scanned pages):
+
+```bash
+python main.py path/to/document.pdf --scrub --ocr-scrub
 ```
 
 ### Options
