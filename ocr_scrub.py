@@ -28,7 +28,6 @@ from decimal import Decimal
 import pikepdf
 import pypdfium2 as pdfium
 import pytesseract
-from PIL import Image
 
 from pdf_ops import (
     FontCodec,
