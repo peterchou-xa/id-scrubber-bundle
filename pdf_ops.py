@@ -295,7 +295,15 @@ def _parse_tounicode_cmap(cmap_bytes: bytes) -> dict[int, int]:
 class FontCodec:
     """Bidirectional byte ↔ Unicode mapping for a single PDF font."""
 
-    __slots__ = ("cid_to_uni", "uni_to_cid", "byte_width", "cid_to_width", "default_width")
+    __slots__ = (
+        "cid_to_uni",
+        "uni_to_cid",
+        "byte_width",
+        "cid_to_width",
+        "default_width",
+        "ascent",
+        "descent",
+    )
 
     def __init__(
         self,
@@ -303,12 +311,16 @@ class FontCodec:
         byte_width: int,  # 1 for single-byte fonts, 2 for CID/Identity-H
         cid_to_width: dict[int, int] | None = None,
         default_width: int = 1000,
+        ascent: int = 1000,
+        descent: int = 0,
     ):
         self.cid_to_uni = cid_to_uni
         self.uni_to_cid = {v: k for k, v in cid_to_uni.items()}
         self.byte_width = byte_width
         self.cid_to_width: dict[int, int] = cid_to_width or {}
         self.default_width = default_width
+        self.ascent = ascent
+        self.descent = descent
 
     def decode(self, raw: bytes) -> str:
         chars: list[str] = []
@@ -423,6 +435,37 @@ def _extract_font_widths(font_obj: pikepdf.Object) -> tuple[dict[int, int], int]
     return cid_to_width, default_width
 
 
+def _extract_font_vertical_metrics(font_obj: pikepdf.Object) -> tuple[int, int]:
+    """Return (ascent, descent) in PDF font units (1/1000 em)."""
+    default_ascent = 1000
+    default_descent = 0
+
+    try:
+        fd = font_obj.get("/FontDescriptor")
+        if fd is None and str(font_obj.get("/Subtype", "")) == "/Type0":
+            descendants = font_obj.get("/DescendantFonts")
+            if descendants:
+                fd = descendants[0].get("/FontDescriptor")
+        if fd is not None:
+            ascent = fd.get("/Ascent")
+            descent = fd.get("/Descent")
+            if ascent is not None:
+                default_ascent = int(ascent)
+            if descent is not None:
+                default_descent = int(descent)
+            if (ascent is None or descent is None) and fd.get("/FontBBox") is not None:
+                bbox = fd.get("/FontBBox")
+                if len(bbox) == 4:
+                    if ascent is None:
+                        default_ascent = int(bbox[3])
+                    if descent is None:
+                        default_descent = int(bbox[1])
+    except Exception:
+        pass
+
+    return default_ascent, default_descent
+
+
 def _resolve_font_codec(font_obj: pikepdf.Object) -> FontCodec | None:
     """Build a FontCodec from a PDF font object, handling all common encodings."""
     subtype = str(font_obj.get("/Subtype", ""))
@@ -439,6 +482,7 @@ def _resolve_font_codec(font_obj: pikepdf.Object) -> FontCodec | None:
             byte_width = 2
 
     cid_to_width, default_width = _extract_font_widths(font_obj)
+    ascent, descent = _extract_font_vertical_metrics(font_obj)
 
     # --- Priority 1: ToUnicode CMap (most reliable) ---
     if tounicode is not None:
@@ -446,7 +490,14 @@ def _resolve_font_codec(font_obj: pikepdf.Object) -> FontCodec | None:
             cmap_bytes = tounicode.read_bytes()
             cid_to_uni = _parse_tounicode_cmap(cmap_bytes)
             if cid_to_uni:
-                return FontCodec(cid_to_uni, byte_width, cid_to_width, default_width)
+                return FontCodec(
+                    cid_to_uni,
+                    byte_width,
+                    cid_to_width,
+                    default_width,
+                    ascent,
+                    descent,
+                )
         except Exception:
             pass
 
@@ -495,7 +546,14 @@ def _resolve_font_codec(font_obj: pikepdf.Object) -> FontCodec | None:
         # Fallback: identity mapping (Latin-1)
         base_map = {i: i for i in range(256)}
 
-    return FontCodec(base_map, byte_width, cid_to_width, default_width)
+    return FontCodec(
+        base_map,
+        byte_width,
+        cid_to_width,
+        default_width,
+        ascent,
+        descent,
+    )
 
 
 # Minimal Adobe glyph name → Unicode mapping for /Differences
@@ -837,13 +895,6 @@ def _build_page_codecs(page: pikepdf.Page) -> dict[str, FontCodec]:
 
 SCRUB_DEBUG = os.environ.get("SCRUB_DEBUG") == "1"
 
-# When True, compute mask rectangles by simulating text-state during the
-# content-stream rewrite, bypassing the pdfminer-based locate pass. This is
-# more reliable (no font-fallback drift, no mask-string search) but relies on
-# correct Tm/Td/Tf tracking. Set to False to fall back to the original
-# pdfminer locate path.
-USE_INLINE_HIGHLIGHT = os.environ.get("USE_INLINE_HIGHLIGHT", "1") == "1"
-
 
 def _find_pii_match(decoded: str, pii: str, start: int) -> tuple[int, int] | None:
     """Find *pii* in *decoded* starting at *start*, tolerating extra whitespace.
@@ -881,44 +932,60 @@ def _find_pii_match(decoded: str, pii: str, start: int) -> tuple[int, int] | Non
     return None
 
 
-def _replace_pii(decoded: str, pii_values: list[str]) -> str | None:
-    """Replace PII in decoded text, tolerating whitespace differences.
+def _merge_spans(spans: list[tuple[int, int]], text: str) -> list[tuple[int, int]]:
+    """Merge overlapping spans and spans separated only by whitespace."""
+    if not spans:
+        return []
+    merged = [spans[0]]
+    for start, end in spans[1:]:
+        prev_start, prev_end = merged[-1]
+        gap = text[prev_end:start]
+        if start <= prev_end or (gap and gap.isspace()):
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return merged
 
-    Returns None if no match. Matched characters are replaced with their mask
-    equivalent; whitespace within a match is preserved (space → space under
-    mask_pii_value anyway, so this is a no-op semantically).
-    """
-    chars = list(decoded)
-    changed = False
-    matched: list[str] = []
 
+def _find_pii_spans(decoded: str, pii_values: list[str]) -> list[tuple[int, int]]:
+    """Return matched spans in decoded text before any replacement."""
+    spans: list[tuple[int, int]] = []
     for pii in pii_values:
         start = 0
-        while start < len(chars):
-            m = _find_pii_match("".join(chars), pii, start)
+        while start < len(decoded):
+            m = _find_pii_match(decoded, pii, start)
             if m is None:
                 break
-            ms, me = m
-            for idx in range(ms, me):
-                chars[idx] = (
-                    "0" if chars[idx].isdigit()
-                    else "X" if chars[idx].isalpha()
-                    else chars[idx]
-                )
-            if not changed or pii not in matched:
-                matched.append(pii)
-            changed = True
-            start = me
+            spans.append(m)
+            start = m[1]
+    spans.sort()
+    return _merge_spans(spans, decoded)
 
+
+def _replace_pii(decoded: str, pii_values: list[str]) -> str | None:
+    """Blank matched PII spans in decoded text, preserving whitespace."""
+    spans = _find_pii_spans(decoded, pii_values)
+    if not spans:
+        if SCRUB_DEBUG and decoded.strip() and any(c.isalpha() for c in decoded):
+            preview = decoded if len(decoded) < 120 else decoded[:117] + "..."
+            print(f"[scrub] no-match run={preview!r}", file=sys.stderr)
+        return None
+
+    chars = list(decoded)
+    matched: list[str] = []
+    for ms, me in spans:
+        for idx in range(ms, me):
+            if not chars[idx].isspace():
+                chars[idx] = " "
+
+    for pii in pii_values:
+        if any(_find_pii_match(decoded, pii, start) for start in range(len(decoded))):
+            matched.append(pii)
     result = "".join(chars)
     if SCRUB_DEBUG:
         preview = decoded if len(decoded) < 120 else decoded[:117] + "..."
-        if changed:
-            print(f"[scrub] MATCH  run={preview!r}  hit={matched}", file=sys.stderr)
-        else:
-            if decoded.strip() and any(c.isalpha() for c in decoded):
-                print(f"[scrub] no-match run={preview!r}", file=sys.stderr)
-    return result if changed else None
+        print(f"[scrub] MATCH  run={preview!r}  hit={matched}", file=sys.stderr)
+    return result
 
 
 def _try_replace_run(
@@ -1003,28 +1070,88 @@ def _try_replace_run(
             new_seg[key] = replaced[offset : offset + length]
         offset += length
 
+    def changed_spans(orig_str: str, new_str: str) -> list[tuple[int, int]]:
+        spans: list[tuple[int, int]] = []
+        start: int | None = None
+        for idx, (orig_ch, new_ch) in enumerate(zip(orig_str, new_str)):
+            changed = orig_ch != new_ch
+            if changed and start is None:
+                start = idx
+            elif not changed and start is not None:
+                spans.append((start, idx))
+                start = None
+        if start is not None:
+            spans.append((start, len(orig_str)))
+        return spans
+
+    def expand_replaced_segment(orig_str: str, new_str: str) -> list:
+        spans = changed_spans(orig_str, new_str)
+        if not spans:
+            return [pikepdf.String(codec.encode(new_str))]
+
+        parts: list = []
+        cursor = 0
+        for start_idx, end_idx in spans:
+            if start_idx > cursor:
+                parts.append(pikepdf.String(codec.encode(new_str[cursor:start_idx])))
+
+            replaced_piece = new_str[start_idx:end_idx]
+            if replaced_piece:
+                parts.append(pikepdf.String(codec.encode(replaced_piece)))
+
+            orig_width = codec.glyph_width_sum(codec.encode(orig_str[start_idx:end_idx]))
+            new_width = codec.glyph_width_sum(codec.encode(replaced_piece))
+            width_delta = orig_width - new_width
+            if width_delta:
+                # TJ numeric operands are in 1/1000 em units; negative moves right.
+                parts.append(-width_delta)
+            cursor = end_idx
+
+        if cursor < len(new_str):
+            parts.append(pikepdf.String(codec.encode(new_str[cursor:])))
+
+        compact: list = []
+        for part in parts:
+            if isinstance(part, pikepdf.String) and len(bytes(part)) == 0:
+                continue
+            compact.append(part)
+        return compact or [pikepdf.String(b"")]
+
     # Rebuild instruction objects (positioning ops passed through unchanged)
     result: list = []
     for item_idx, (operands, operator) in enumerate(run):
         op = str(operator)
         if op == "Tj":
+            orig_str = seg_map[[k for k, v in enumerate(seg_map) if v[0] == item_idx and v[1] is None][0]][2]
             new_str = new_seg[(item_idx, None)]
-            result.append(
-                pikepdf.ContentStreamInstruction(
-                    pikepdf._core._ObjectList([pikepdf.String(codec.encode(new_str))]),
-                    operator,
+            expanded = expand_replaced_segment(orig_str, new_str)
+            if len(expanded) == 1 and isinstance(expanded[0], pikepdf.String):
+                result.append(
+                    pikepdf.ContentStreamInstruction(
+                        pikepdf._core._ObjectList([expanded[0]]),
+                        operator,
+                    )
                 )
-            )
+            else:
+                result.append(
+                    pikepdf.ContentStreamInstruction(
+                        pikepdf._core._ObjectList([pikepdf.Array(expanded)]),
+                        pikepdf.Operator("TJ"),
+                    )
+                )
         elif op == "TJ":
             new_arr = list(operands[0])
+            expanded_arr: list = []
             for elem_idx, elem in enumerate(operands[0]):
                 if isinstance(elem, pikepdf.String):
-                    new_arr[elem_idx] = pikepdf.String(
-                        codec.encode(new_seg[(item_idx, elem_idx)])
-                    )
+                    orig_str = codec.decode(bytes(elem))
+                    new_str = new_seg[(item_idx, elem_idx)]
+                    expanded_arr.extend(expand_replaced_segment(orig_str, new_str))
+                else:
+                    expanded_arr.append(elem)
             result.append(
                 pikepdf.ContentStreamInstruction(
-                    pikepdf._core._ObjectList([pikepdf.Array(new_arr)]),
+                    pikepdf._core._ObjectList([pikepdf.Array(expanded_arr)]),
                     operator,
                 )
             )
@@ -1033,65 +1160,403 @@ def _try_replace_run(
     return result
 
 
-def _inject_inline_highlights(
-    orig_instructions: list,
-    new_instructions: list,
-) -> list:
-    """Return a rewritten instruction list that paints every modified Tj/TJ
-    in red by wrapping it with q / 1 0 0 rg / <Tj> / Q. Uses the graphics-state
-    stack so the surrounding fill color is preserved.
-    """
-    assert len(orig_instructions) == len(new_instructions)
-    out: list = []
+def _mat_mul(a: list[float], b: list[float]) -> list[float]:
+    """3x3 matrix multiply in PDF's [a b c d e f] form (row-major reduced)."""
+    a0, a1, a2, a3, a4, a5 = a
+    b0, b1, b2, b3, b4, b5 = b
+    return [
+        a0 * b0 + a1 * b2,
+        a0 * b1 + a1 * b3,
+        a2 * b0 + a3 * b2,
+        a2 * b1 + a3 * b3,
+        a4 * b0 + a5 * b2 + b4,
+        a4 * b1 + a5 * b3 + b5,
+    ]
 
-    for idx, (operands, operator) in enumerate(new_instructions):
+
+def _identity() -> list[float]:
+    return [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+
+
+def _apply_matrix(m: list[float], x: float, y: float) -> tuple[float, float]:
+    return (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+
+
+def _rect_overlay_stream(
+    bboxes: list[tuple[float, float, float, float]]
+) -> bytes:
+    """Build a content-stream snippet that draws filled black rectangles."""
+    parts = [b"q\n0 0 0 rg\n"]
+    for x0, y0, x1, y1 in bboxes:
+        parts.append(f"{x0:.2f} {y0:.2f} {x1 - x0:.2f} {y1 - y0:.2f} re f\n".encode())
+    parts.append(b"Q\n")
+    return b"".join(parts)
+
+
+def _collect_pii_bboxes(
+    instructions: list,
+    codecs: dict[str, FontCodec],
+    pii_values: list[str],
+) -> list[tuple[float, float, float, float]]:
+    """Return PDF-space bboxes for matched PII spans before replacement."""
+    bboxes: list[tuple[float, float, float, float]] = []
+    ctm_stack: list[list[float]] = [_identity()]
+    tm: list[float] = _identity()
+    tlm: list[float] = _identity()
+    font_name: str | None = None
+    font_size = 0.0
+    leading = 0.0
+    tc = 0.0
+    tw = 0.0
+    tz = 100.0
+    trise = 0.0
+
+    def current_font_codec() -> FontCodec | None:
+        if font_name is None:
+            return None
+        return codecs.get(font_name)
+
+    def glyph_advance(ch: str, codec: FontCodec) -> float:
+        width_units = codec.glyph_width_sum(codec.encode(ch))
+        return (width_units / 1000.0) * font_size * (tz / 100.0)
+
+    def char_positions(decoded: str, codec: FontCodec) -> tuple[list[float], list[float]]:
+        starts: list[float] = []
+        ends: list[float] = []
+        cursor = 0.0
+        for idx, ch in enumerate(decoded):
+            starts.append(cursor)
+            cursor += glyph_advance(ch, codec)
+            ends.append(cursor)
+            if idx < len(decoded) - 1:
+                cursor += tc * (tz / 100.0)
+                if ch == " ":
+                    cursor += tw * (tz / 100.0)
+        return starts, ends
+
+    def decoded_bbox(
+        decoded: str,
+        codec: FontCodec,
+        start_idx: int = 0,
+        end_idx: int | None = None,
+    ) -> tuple[float, float, float, float] | None:
+        if end_idx is None:
+            end_idx = len(decoded)
+        if start_idx < 0 or end_idx > len(decoded) or start_idx >= end_idx:
+            return None
+        starts, ends = char_positions(decoded, codec)
+        x0_text = starts[start_idx]
+        x1_text = ends[end_idx - 1]
+        y0_text = trise + (codec.descent / 1000.0) * font_size
+        y1_text = trise + (codec.ascent / 1000.0) * font_size
+        corners = [
+            (x0_text, y0_text),
+            (x1_text, y0_text),
+            (x0_text, y1_text),
+            (x1_text, y1_text),
+        ]
+        combined = _mat_mul(tm, ctm_stack[-1])
+        xs: list[float] = []
+        ys: list[float] = []
+        for cx, cy in corners:
+            ux, uy = _apply_matrix(combined, cx, cy)
+            xs.append(ux)
+            ys.append(uy)
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def advance_tm(width_units: float, decoded: str) -> None:
+        nonlocal tm
+        advance = (width_units / 1000.0) * font_size
+        advance += len(decoded) * tc
+        advance += decoded.count(" ") * tw
+        advance *= tz / 100.0
+        tm = _mat_mul([1.0, 0.0, 0.0, 1.0, advance, 0.0], tm)
+
+    def union_bbox(
+        box_a: tuple[float, float, float, float] | None,
+        box_b: tuple[float, float, float, float] | None,
+    ) -> tuple[float, float, float, float] | None:
+        if box_a is None:
+            return box_b
+        if box_b is None:
+            return box_a
+        return (
+            min(box_a[0], box_b[0]),
+            min(box_a[1], box_b[1]),
+            max(box_a[2], box_b[2]),
+            max(box_a[3], box_b[3]),
+        )
+
+    def collect_run_bboxes(run: list[tuple], codec: FontCodec) -> tuple[list[tuple[float, float, float, float]], list[float]]:
+        nonlocal tm
+        local_tm = list(tm)
+        text_ops = {"Tj", "TJ"}
+        seg_map: list[tuple[int, int | None, str]] = []
+        full_parts: list[str] = []
+        prev_was_text = False
+
+        for item_idx, (operands, operator) in enumerate(run):
+            op = str(operator)
+            if op == "Tj":
+                if prev_was_text is False and full_parts:
+                    full_parts.append(" ")
+                decoded = codec.decode(bytes(operands[0]))
+                seg_map.append((item_idx, None, decoded))
+                full_parts.append(decoded)
+                prev_was_text = True
+            elif op == "TJ":
+                if prev_was_text is False and full_parts:
+                    full_parts.append(" ")
+                for elem_idx, elem in enumerate(operands[0]):
+                    if isinstance(elem, pikepdf.String):
+                        decoded = codec.decode(bytes(elem))
+                        seg_map.append((item_idx, elem_idx, decoded))
+                        full_parts.append(decoded)
+                prev_was_text = True
+            else:
+                prev_was_text = False
+
+        full_text = "".join(full_parts)
+        matched_spans = _find_pii_spans(full_text, pii_values)
+        if not matched_spans:
+            for operands, operator in run:
+                op = str(operator)
+                if op == "Tj":
+                    decoded = codec.decode(bytes(operands[0]))
+                    width_units = codec.glyph_width_sum(bytes(operands[0]))
+                    local_tm = _mat_mul([1.0, 0.0, 0.0, 1.0, ((width_units / 1000.0) * font_size + len(decoded) * tc + decoded.count(" ") * tw) * (tz / 100.0), 0.0], local_tm)
+                elif op == "TJ":
+                    for elem in operands[0]:
+                        if isinstance(elem, pikepdf.String):
+                            raw = bytes(elem)
+                            decoded = codec.decode(raw)
+                            width_units = codec.glyph_width_sum(raw)
+                            local_tm = _mat_mul([1.0, 0.0, 0.0, 1.0, ((width_units / 1000.0) * font_size + len(decoded) * tc + decoded.count(" ") * tw) * (tz / 100.0), 0.0], local_tm)
+                        elif isinstance(elem, (int, float, Decimal)):
+                            advance = -(float(elem) / 1000.0) * font_size * (tz / 100.0)
+                            local_tm = _mat_mul([1.0, 0.0, 0.0, 1.0, advance, 0.0], local_tm)
+                elif op == "Td" and len(operands) >= 2:
+                    tlm_local = _mat_mul([1.0, 0.0, 0.0, 1.0, float(operands[0]), float(operands[1])], local_tm)
+                    local_tm = list(tlm_local)
+            return [], local_tm
+
+        origin: list[tuple[int, int | None] | None] = []
+        prev_was_text = False
+        for item_idx, (operands, operator) in enumerate(run):
+            op = str(operator)
+            if op in text_ops:
+                if prev_was_text is False and origin:
+                    origin.append(None)
+                if op == "Tj":
+                    origin.append((item_idx, None))
+                else:
+                    for elem_idx, elem in enumerate(operands[0]):
+                        if isinstance(elem, pikepdf.String):
+                            origin.append((item_idx, elem_idx))
+                prev_was_text = True
+            else:
+                prev_was_text = False
+
+        span_segments: list[dict[tuple[int, int | None], tuple[int, int]]] = [
+            {} for _ in matched_spans
+        ]
+        offset = 0
+        for part, key in zip(full_parts, origin):
+            length = len(part)
+            if key is not None:
+                for span_idx, (span_start, span_end) in enumerate(matched_spans):
+                    overlap_start = max(offset, span_start)
+                    overlap_end = min(offset + length, span_end)
+                    if overlap_start < overlap_end:
+                        local_start = overlap_start - offset
+                        local_end = overlap_end - offset
+                        prev = span_segments[span_idx].get(key)
+                        if prev is None:
+                            span_segments[span_idx][key] = (local_start, local_end)
+                        else:
+                            span_segments[span_idx][key] = (
+                                min(prev[0], local_start),
+                                max(prev[1], local_end),
+                            )
+            offset += length
+
+        run_bboxes: list[tuple[float, float, float, float] | None] = [None] * len(matched_spans)
+        local_tlm = list(tlm)
+        prev_was_text = False
+
+        for item_idx, (operands, operator) in enumerate(run):
+            op = str(operator)
+            if op == "Tj":
+                if prev_was_text is False and item_idx > 0:
+                    pass
+                decoded = codec.decode(bytes(operands[0]))
+                key = (item_idx, None)
+                saved_tm = tm
+                tm = local_tm
+                for span_idx, segs in enumerate(span_segments):
+                    if key in segs:
+                        bbox = decoded_bbox(decoded, codec, *segs[key])
+                        run_bboxes[span_idx] = union_bbox(run_bboxes[span_idx], bbox)
+                width_units = codec.glyph_width_sum(bytes(operands[0]))
+                advance_tm(width_units, decoded)
+                local_tm = tm
+                tm = saved_tm
+                prev_was_text = True
+            elif op == "TJ":
+                if prev_was_text is False and item_idx > 0:
+                    pass
+                for elem_idx, elem in enumerate(operands[0]):
+                    if isinstance(elem, pikepdf.String):
+                        raw = bytes(elem)
+                        decoded = codec.decode(raw)
+                        key = (item_idx, elem_idx)
+                        saved_tm = tm
+                        tm = local_tm
+                        for span_idx, segs in enumerate(span_segments):
+                            if key in segs:
+                                bbox = decoded_bbox(decoded, codec, *segs[key])
+                                run_bboxes[span_idx] = union_bbox(run_bboxes[span_idx], bbox)
+                        width_units = codec.glyph_width_sum(raw)
+                        advance_tm(width_units, decoded)
+                        local_tm = tm
+                        tm = saved_tm
+                    elif isinstance(elem, (int, float, Decimal)):
+                        advance = -(float(elem) / 1000.0) * font_size * (tz / 100.0)
+                        local_tm = _mat_mul([1.0, 0.0, 0.0, 1.0, advance, 0.0], local_tm)
+                prev_was_text = True
+            elif op == "Td" and len(operands) >= 2:
+                local_tlm = _mat_mul([1.0, 0.0, 0.0, 1.0, float(operands[0]), float(operands[1])], local_tlm)
+                local_tm = list(local_tlm)
+                prev_was_text = False
+            elif op == "TD" and len(operands) >= 2:
+                ty = float(operands[1])
+                local_tlm = _mat_mul([1.0, 0.0, 0.0, 1.0, float(operands[0]), ty], local_tlm)
+                local_tm = list(local_tlm)
+                prev_was_text = False
+            elif op == "Tm" and len(operands) == 6:
+                local_tm = [float(x) for x in operands]
+                local_tlm = list(local_tm)
+                prev_was_text = False
+            elif op == "T*":
+                local_tlm = _mat_mul([1.0, 0.0, 0.0, 1.0, 0.0, -leading], local_tlm)
+                local_tm = list(local_tlm)
+                prev_was_text = False
+            else:
+                prev_was_text = False
+
+        return [bbox for bbox in run_bboxes if bbox is not None], local_tm
+
+    i = 0
+    while i < len(instructions):
+        operands, operator = instructions[i]
         op = str(operator)
 
-        if op in ("Tj", "TJ"):
-            orig_ops, orig_op = orig_instructions[idx]
-            modified = False
-            if str(orig_op) != op:
-                modified = True
-            elif op == "Tj":
-                modified = bytes(operands[0]) != bytes(orig_ops[0])
-            elif op == "TJ":
-                for e_new, e_orig in zip(operands[0], orig_ops[0]):
-                    if isinstance(e_new, pikepdf.String) and isinstance(e_orig, pikepdf.String):
-                        if bytes(e_new) != bytes(e_orig):
-                            modified = True
-                            break
+        if op == "q":
+            ctm_stack.append(list(ctm_stack[-1]))
+            i += 1
+            continue
+        if op == "Q":
+            if len(ctm_stack) > 1:
+                ctm_stack.pop()
+            i += 1
+            continue
+        if op == "cm" and len(operands) == 6:
+            ctm_stack[-1] = _mat_mul([float(x) for x in operands], ctm_stack[-1])
+            i += 1
+            continue
+        if op == "BT":
+            tm = _identity()
+            tlm = _identity()
+            i += 1
+            continue
+        if op == "ET":
+            i += 1
+            continue
+        if op == "Tf" and len(operands) >= 2:
+            font_name = str(operands[0])
+            font_size = float(operands[1])
+            i += 1
+            continue
+        if op == "Tc" and operands:
+            tc = float(operands[0])
+            i += 1
+            continue
+        if op == "Tw" and operands:
+            tw = float(operands[0])
+            i += 1
+            continue
+        if op == "Tz" and operands:
+            tz = float(operands[0])
+            i += 1
+            continue
+        if op == "TL" and operands:
+            leading = float(operands[0])
+            i += 1
+            continue
+        if op == "Ts" and operands:
+            trise = float(operands[0])
+            i += 1
+            continue
+        if op == "Td" and len(operands) >= 2:
+            tlm = _mat_mul([1.0, 0.0, 0.0, 1.0, float(operands[0]), float(operands[1])], tlm)
+            tm = list(tlm)
+            i += 1
+            continue
+        if op == "TD" and len(operands) >= 2:
+            tx, ty = float(operands[0]), float(operands[1])
+            leading = -ty
+            tlm = _mat_mul([1.0, 0.0, 0.0, 1.0, tx, ty], tlm)
+            tm = list(tlm)
+            i += 1
+            continue
+        if op == "Tm" and len(operands) == 6:
+            tm = [float(x) for x in operands]
+            tlm = list(tm)
+            i += 1
+            continue
+        if op == "T*":
+            tlm = _mat_mul([1.0, 0.0, 0.0, 1.0, 0.0, -leading], tlm)
+            tm = list(tlm)
+            i += 1
+            continue
 
-            if modified:
-                out.append(pikepdf.ContentStreamInstruction([], pikepdf.Operator("q")))
-                out.append(pikepdf.ContentStreamInstruction(
-                    [Decimal("1"), Decimal("0"), Decimal("0")],
-                    pikepdf.Operator("rg"),
-                ))
-                out.append(pikepdf.ContentStreamInstruction(operands, operator))
-                out.append(pikepdf.ContentStreamInstruction([], pikepdf.Operator("Q")))
-                continue
+        codec = current_font_codec()
+        if op in ("Tj", "TJ") and codec is not None:
+            text_ops = {"Tj", "TJ"}
+            pos_ops = {"Td", "TD", "T*", "Tm", "TL", "Ts", "Tw", "Tc", "Tz", "Tr"}
+            j = i
+            while j < len(instructions):
+                next_op = str(instructions[j][1])
+                if next_op in text_ops:
+                    j += 1
+                    continue
+                if next_op in pos_ops:
+                    k = j + 1
+                    while k < len(instructions) and str(instructions[k][1]) in pos_ops:
+                        k += 1
+                    if k < len(instructions) and str(instructions[k][1]) in text_ops:
+                        j = k
+                        continue
+                break
+            run = instructions[i:j]
+            run_bboxes, run_tm = collect_run_bboxes(run, codec)
+            bboxes.extend(run_bboxes)
+            tm = run_tm
+            i = j
+            continue
 
-        out.append(pikepdf.ContentStreamInstruction(operands, operator))
+        i += 1
 
-    return out
+    return bboxes
 
 
 def scrub_pdf(
     pdf_path: str, pii_values: list[str], output_path: str
 ) -> None:
-    """Generate a new PDF with PII replaced in content streams and painted red."""
-    mask_chars: set[str] = set()
-    for pii in pii_values:
-        mask_chars.update(mask_pii_value(pii))
-
+    """Generate a new PDF with PII blanked in the text layer and boxed out."""
     pdf = pikepdf.open(pdf_path)
-    # Per-page (orig_instructions, new_instructions) for the red-glyph pass.
-    page_instr_cache: dict[int, tuple[list, list]] = {}
 
-    # Pass 1: replace content streams.
     for page_idx, page in enumerate(pdf.pages):
-        page_num = page_idx + 1
-        _ensure_mask_chars_in_fonts(page, pdf, mask_chars)
         codecs = _build_page_codecs(page)
         if not codecs:
             continue
@@ -1156,25 +1621,14 @@ def scrub_pdf(
             i += 1
 
         if modified:
-            new_stream = pikepdf.unparse_content_stream(new_instructions)
-            page.Contents = pdf.make_stream(new_stream)
-            page_instr_cache[page_num] = (instructions, new_instructions)
-
-    if not page_instr_cache:
-        pdf.save(output_path)
-        pdf.close()
-        return
-
-    if USE_INLINE_HIGHLIGHT:
-        # Rewrite each modified page's content stream so every replaced
-        # Tj/TJ is drawn in red inline. No annotations, no pdfminer pass.
-        for page_idx, page in enumerate(pdf.pages):
-            page_num = page_idx + 1
-            if page_num not in page_instr_cache:
-                continue
-            orig, new = page_instr_cache[page_num]
-            with_bg = _inject_inline_highlights(orig, new)
-            page.Contents = pdf.make_stream(pikepdf.unparse_content_stream(with_bg))
+            bboxes = _collect_pii_bboxes(instructions, codecs, pii_values)
+            combined = (
+                b"q\n"
+                + pikepdf.unparse_content_stream(new_instructions)
+                + b"\nQ\n"
+                + _rect_overlay_stream(bboxes)
+            )
+            page.Contents = pdf.make_stream(combined)
 
     pdf.save(output_path)
     pdf.close()

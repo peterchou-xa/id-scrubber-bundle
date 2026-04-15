@@ -217,6 +217,7 @@ def _run_ocr_scrub(args) -> None:
     print(f"  {len(pages)} page(s), {sum(len(p.words) for p in pages)} word(s) total.", file=sys.stderr)
 
     full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
+    # print("ocr full text: ", full_text)
     print(f"OCR extracted {len(full_text):,} characters.", file=sys.stderr)
 
     chunks = chunk_text(full_text, args.chunk_size)
@@ -330,11 +331,10 @@ def main():
 
     if args.ocr_scrub:
         _run_ocr_scrub(args)
-        return
 
     print(f"Extracting text from: {args.pdf}", file=sys.stderr)
     full_text = extract_text_from_pdf(args.pdf)
-    print(full_text)
+    # print(full_text)
     print(f"Extracted {len(full_text):,} characters.", file=sys.stderr)
 
     chunks = chunk_text(full_text, args.chunk_size)

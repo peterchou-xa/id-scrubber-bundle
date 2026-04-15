@@ -34,7 +34,6 @@ from pdf_ops import (
     FontCodec,
     _build_page_codecs,
     _ensure_mask_chars_in_fonts,
-    _inject_inline_highlights,
     mask_pii_value,
 )
 
@@ -291,36 +290,42 @@ def redact_content_stream(
             return None
         return codecs.get(font_name)
 
-    def tj_bbox(raw: bytes, codec: FontCodec) -> tuple[float, float, float, float] | None:
-        """Compute the PDF-space bbox of a Tj operand given current text state."""
-        width_units = codec.glyph_width_sum(raw)  # 1/1000 em
-        if width_units <= 0:
+    def char_positions(decoded: str, codec: FontCodec) -> tuple[list[float], list[float]]:
+        starts: list[float] = []
+        ends: list[float] = []
+        cursor = 0.0
+        for idx, ch in enumerate(decoded):
+            starts.append(cursor)
+            width_units = codec.glyph_width_sum(codec.encode(ch))
+            cursor += (width_units / 1000.0) * font_size * (tz / 100.0)
+            ends.append(cursor)
+            if idx < len(decoded) - 1:
+                cursor += tc * (tz / 100.0)
+                if ch == " ":
+                    cursor += tw * (tz / 100.0)
+        return starts, ends
+
+    def decoded_bbox(
+        decoded: str,
+        codec: FontCodec,
+        start_idx: int = 0,
+        end_idx: int | None = None,
+    ) -> tuple[float, float, float, float] | None:
+        """Compute the PDF-space bbox of a decoded substring at current text state."""
+        if end_idx is None:
+            end_idx = len(decoded)
+        if start_idx < 0 or end_idx > len(decoded) or start_idx >= end_idx:
             return None
-
-        # Decode to count chars for Tc/Tw spacing contribution (approximation).
-        decoded = codec.decode(raw)
-        n_chars = len(decoded)
-        n_spaces = decoded.count(" ")
-
-        # Horizontal advance in unscaled text space (before Tm/CTM):
-        # w = (width_units / 1000 - Tj/1000) * Tfs + Tc + Tw_if_space, * Tz/100
-        advance_text = (width_units / 1000.0) * font_size
-        # Char spacing adds per-char (including last, per PDF spec).
-        advance_text += n_chars * tc
-        advance_text += n_spaces * tw
-        advance_text *= tz / 100.0
-
-        # Glyph height: approximate with font size (full em box).
-        height = font_size
-        # y offset from baseline: text rise.
-        baseline_offset = trise
-
-        # Four corners in text space, relative to current text matrix origin.
+        starts, ends = char_positions(decoded, codec)
+        x0_text = starts[start_idx]
+        x1_text = ends[end_idx - 1]
+        y0_text = trise + (codec.descent / 1000.0) * font_size
+        y1_text = trise + (codec.ascent / 1000.0) * font_size
         corners = [
-            (0.0, baseline_offset),
-            (advance_text, baseline_offset),
-            (0.0, baseline_offset + height),
-            (advance_text, baseline_offset + height),
+            (x0_text, y0_text),
+            (x1_text, y0_text),
+            (x0_text, y1_text),
+            (x1_text, y1_text),
         ]
 
         # Combine Tm and CTM: user-space = CTM × Tm × point.
@@ -334,11 +339,69 @@ def redact_content_stream(
             ys.append(uy)
         return (min(xs), min(ys), max(xs), max(ys))
 
+    def tj_bbox(raw: bytes, codec: FontCodec) -> tuple[float, float, float, float] | None:
+        decoded = codec.decode(raw)
+        return decoded_bbox(decoded, codec, 0, len(decoded))
+
     def advance_tm(width_units: float, n_chars: int, n_spaces: int) -> None:
         nonlocal tm
         advance = (width_units / 1000.0) * font_size + n_chars * tc + n_spaces * tw
         advance *= tz / 100.0
         tm = _mat_mul([1.0, 0.0, 0.0, 1.0, advance, 0.0], tm)
+
+    def overlap_spans(decoded: str, codec: FontCodec) -> list[tuple[int, int]]:
+        spans: list[tuple[int, int]] = []
+        start: int | None = None
+        for idx, ch in enumerate(decoded):
+            if ch.isspace():
+                hit = False
+            else:
+                char_box = decoded_bbox(decoded, codec, idx, idx + 1)
+                hit = char_box is not None and any(
+                    _bbox_overlap(char_box, pb) for pb in pii_bboxes
+                )
+            if hit and start is None:
+                start = idx
+            elif not hit and start is not None:
+                spans.append((start, idx))
+                start = None
+        if start is not None:
+            spans.append((start, len(decoded)))
+        return spans
+
+    def expand_replaced_segment(orig_str: str, codec: FontCodec) -> tuple[list, bool]:
+        spans = overlap_spans(orig_str, codec)
+        if not spans:
+            return [pikepdf.String(codec.encode(orig_str))], False
+
+        parts: list = []
+        cursor = 0
+        for start_idx, end_idx in spans:
+            if start_idx > cursor:
+                parts.append(pikepdf.String(codec.encode(orig_str[cursor:start_idx])))
+
+            replaced_piece = "".join(
+                " " if not ch.isspace() else ch for ch in orig_str[start_idx:end_idx]
+            )
+            if replaced_piece:
+                parts.append(pikepdf.String(codec.encode(replaced_piece)))
+
+            orig_width = codec.glyph_width_sum(codec.encode(orig_str[start_idx:end_idx]))
+            new_width = codec.glyph_width_sum(codec.encode(replaced_piece))
+            width_delta = orig_width - new_width
+            if width_delta:
+                parts.append(-width_delta)
+            cursor = end_idx
+
+        if cursor < len(orig_str):
+            parts.append(pikepdf.String(codec.encode(orig_str[cursor:])))
+
+        compact: list = []
+        for part in parts:
+            if isinstance(part, pikepdf.String) and len(bytes(part)) == 0:
+                continue
+            compact.append(part)
+        return compact or [pikepdf.String(b"")], True
 
     for operands, operator in orig_instructions:
         op = str(operator)
@@ -421,18 +484,18 @@ def redact_content_stream(
             raw = bytes(operands[-1]) if isinstance(operands[-1], pikepdf.String) else None
             codec = current_font_codec()
             if raw is not None and codec is not None:
-                bbox = tj_bbox(raw, codec)
-                hit = bbox is not None and any(
-                    _bbox_overlap(bbox, pb) for pb in pii_bboxes
-                )
+                decoded = codec.decode(raw)
+                replaced_parts, hit = expand_replaced_segment(decoded, codec)
                 if hit:
-                    decoded = codec.decode(raw)
-                    masked = " " * len(decoded)
-                    new_raw = codec.encode(masked)
                     new_ops = list(operands)
-                    new_ops[-1] = pikepdf.String(new_raw)
+                    if len(replaced_parts) == 1 and isinstance(replaced_parts[0], pikepdf.String):
+                        new_ops[-1] = replaced_parts[0]
+                        new_operator = operator
+                    else:
+                        new_ops = [pikepdf.Array(replaced_parts)]
+                        new_operator = pikepdf.Operator("TJ")
                     new_instructions.append(pikepdf.ContentStreamInstruction(
-                        pikepdf._core._ObjectList(new_ops), operator
+                        pikepdf._core._ObjectList(new_ops), new_operator
                     ))
                     modified = True
                 else:
@@ -456,14 +519,10 @@ def redact_content_stream(
             for elem in arr:
                 if isinstance(elem, pikepdf.String) and codec is not None:
                     raw = bytes(elem)
-                    bbox = tj_bbox(raw, codec)
-                    hit = bbox is not None and any(
-                        _bbox_overlap(bbox, pb) for pb in pii_bboxes
-                    )
+                    decoded = codec.decode(raw)
+                    replaced_parts, hit = expand_replaced_segment(decoded, codec)
                     if hit:
-                        decoded = codec.decode(raw)
-                        masked = " " * len(decoded)
-                        new_arr.append(pikepdf.String(codec.encode(masked)))
+                        new_arr.extend(replaced_parts)
                         local_modified = True
                         width = codec.glyph_width_sum(raw)
                         advance_tm(width, len(decoded), decoded.count(" "))
