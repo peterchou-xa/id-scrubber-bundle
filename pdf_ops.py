@@ -1247,8 +1247,12 @@ def _collect_pii_bboxes(
         starts, ends = char_positions(decoded, codec)
         x0_text = starts[start_idx]
         x1_text = ends[end_idx - 1]
-        y0_text = trise + (codec.descent / 1000.0) * font_size
-        y1_text = trise + (codec.ascent / 1000.0) * font_size
+        # Font ascent/descent cover diacritics and full descenders, which
+        # makes the rectangle visibly taller than typical glyphs. Shrink
+        # vertically so the highlight hugs the text more tightly.
+        shrink = 0.85
+        y0_text = trise + (codec.descent / 1000.0) * font_size * shrink
+        y1_text = trise + (codec.ascent / 1000.0) * font_size * shrink
         corners = [
             (x0_text, y0_text),
             (x1_text, y0_text),

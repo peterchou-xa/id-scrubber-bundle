@@ -9,8 +9,11 @@ Usage:
 
 import argparse
 import json
+import os
 import re
+import shutil
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -130,21 +133,41 @@ def query_ollama(text_chunk: str, model: str) -> list[dict]:
 
     try:
         items = json.loads(raw)
-        if not isinstance(items, list):
-            return []
-        return items
     except json.JSONDecodeError:
-        # Attempt to extract JSON array from response
         match = re.search(r"\[.*\]", raw, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group())
+                items = json.loads(match.group())
             except json.JSONDecodeError:
-                pass
-        print("Warning: Could not parse model response as JSON.", file=sys.stderr)
+                print("Warning: Could not parse model response as JSON.", file=sys.stderr)
+                return []
+        else:
+            print("Warning: Could not parse model response as JSON.", file=sys.stderr)
+            return []
+
+    if not isinstance(items, list):
         return []
+    return [it for it in items if isinstance(it, dict) and is_valid_pii_item(it)]
 
 
+
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def is_valid_pii_item(item: dict) -> bool:
+    """Drop LLM detections whose value obviously doesn't match the claimed type.
+
+    The small OCR'd-PDF pipeline sees a lot of garbled Tesseract output, and
+    smaller models will happily label noise like '[e |' as an email_address.
+    """
+    pii_type = (item.get("type") or "").strip().lower()
+    value = (item.get("value") or "").strip()
+    if not value:
+        return False
+    if pii_type == "email_address" and not EMAIL_RE.match(value):
+        return False
+    return True
 
 
 def filter_pii_values(values: set[str]) -> set[str]:
@@ -208,16 +231,63 @@ def aggregate_results(all_items: list[dict]) -> list[dict]:
     ]
 
 
-def _run_ocr_scrub(args) -> None:
+def _default_scrubbed_path(pdf_path: str) -> str:
+    path = Path(pdf_path)
+    return str(path.with_stem(path.stem + "_scrubbed"))
+
+
+def _detect_text_pii(args, pdf_path: str) -> tuple[list[dict], set[str]]:
+    print(f"Extracting text from: {pdf_path}", file=sys.stderr)
+    full_text = extract_text_from_pdf(pdf_path)
+    print(f"Extracted {len(full_text):,} characters.", file=sys.stderr)
+
+    chunks = chunk_text(full_text, args.chunk_size)
+    print(f"Processing {len(chunks)} chunk(s) with model '{args.model}'...", file=sys.stderr)
+
+    all_items: list[dict] = []
+    for i, chunk in enumerate(chunks, start=1):
+        print(f"  Chunk {i}/{len(chunks)}...", file=sys.stderr, end=" ")
+        items = query_ollama(chunk, args.model)
+        print(f"{len(items)} PII item(s) found.", file=sys.stderr)
+        all_items.extend(items)
+
+    all_pii_values: set[str] = {
+        item["value"].strip()
+        for item in all_items
+        if isinstance(item.get("value"), str) and item["value"].strip()
+    }
+    all_pii_values.update(parse_custom_pii_values(args.custom_pii))
+
+    return all_items, filter_pii_values(all_pii_values)
+
+
+def _write_json_output(args, file_path: str, pii_list: list[dict]) -> None:
+    output = {
+        "file": file_path,
+        "model": args.model,
+        "total_pii_detected": len(pii_list),
+        "pii": pii_list,
+    }
+    json_output = json.dumps(output, indent=2, ensure_ascii=False)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(json_output)
+        print(f"Results written to: {args.output}", file=sys.stderr)
+    else:
+        print(json_output)
+
+
+def _run_ocr_scrub(args, input_pdf: str, output_pdf: str) -> bool:
     """OCR-based scrub flow: render → OCR → LLM → bbox → redact."""
     import ocr_scrub
 
     print(f"Rendering and OCR-ing pages at {args.ocr_dpi} DPI...", file=sys.stderr)
-    pages = ocr_scrub.ocr_pdf(args.pdf, dpi=args.ocr_dpi)
+    pages = ocr_scrub.ocr_pdf(input_pdf, dpi=args.ocr_dpi)
     print(f"  {len(pages)} page(s), {sum(len(p.words) for p in pages)} word(s) total.", file=sys.stderr)
 
     full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
-    # print("ocr full text: ", full_text)
+    ## TODO delete
+    print("ocr full text: ", full_text)
     print(f"OCR extracted {len(full_text):,} characters.", file=sys.stderr)
 
     chunks = chunk_text(full_text, args.chunk_size)
@@ -242,19 +312,7 @@ def _run_ocr_scrub(args) -> None:
     pii_list_sorted = sorted(all_pii_values)
 
     pii_list = aggregate_results(all_items)
-    output = {
-        "file": args.pdf,
-        "model": args.model,
-        "total_pii_detected": len(pii_list),
-        "pii": pii_list,
-    }
-    json_output = json.dumps(output, indent=2, ensure_ascii=False)
-    if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(json_output)
-        print(f"Results written to: {args.output}", file=sys.stderr)
-    else:
-        print(json_output)
+    _write_json_output(args, input_pdf, pii_list)
 
     # Map PII → bboxes per page.
     page_bboxes: dict[int, list[tuple[float, float, float, float]]] = {}
@@ -267,14 +325,15 @@ def _run_ocr_scrub(args) -> None:
 
     print(f"Matched {total_bboxes} PII region(s) across {len(page_bboxes)} page(s).", file=sys.stderr)
     if not page_bboxes:
-        print("Nothing to redact.", file=sys.stderr)
-        return
+        print("Nothing to redact in OCR pass.", file=sys.stderr)
+        shutil.copyfile(input_pdf, output_pdf)
+        print(f"Scrubbed PDF saved to: {output_pdf}", file=sys.stderr)
+        return False
 
-    pdf_path = Path(args.pdf)
-    scrubbed_path = str(pdf_path.with_stem(pdf_path.stem + "_scrubbed"))
     print(f"Redacting PDF...", file=sys.stderr)
-    ocr_scrub.scrub_with_ocr(args.pdf, page_bboxes, pii_list_sorted, scrubbed_path)
-    print(f"Scrubbed PDF saved to: {scrubbed_path}", file=sys.stderr)
+    ocr_scrub.scrub_with_ocr(input_pdf, page_bboxes, pii_list_sorted, output_pdf)
+    print(f"Scrubbed PDF saved to: {output_pdf}", file=sys.stderr)
+    return True
 
 
 def main():
@@ -285,7 +344,7 @@ def main():
     parser.add_argument("pdf", help="Path to the PDF file to analyze")
     parser.add_argument(
         "--model",
-        default="gemma3",
+        default="gemma3:4b",
         help="Ollama model to use (e.g. gemma3, gemma3:4b, gemma2)",
     )
     parser.add_argument(
@@ -329,61 +388,51 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.ocr_scrub:
-        _run_ocr_scrub(args)
+    source_pdf = args.pdf
+    final_scrubbed_path = _default_scrubbed_path(source_pdf)
+    intermediate_path: str | None = None
 
-    print(f"Extracting text from: {args.pdf}", file=sys.stderr)
-    full_text = extract_text_from_pdf(args.pdf)
-    # print(full_text)
-    print(f"Extracted {len(full_text):,} characters.", file=sys.stderr)
-
-    chunks = chunk_text(full_text, args.chunk_size)
-    print(f"Processing {len(chunks)} chunk(s) with model '{args.model}'...", file=sys.stderr)
-
-    all_items: list[dict] = []
-    for i, chunk in enumerate(chunks, start=1):
-        print(f"  Chunk {i}/{len(chunks)}...", file=sys.stderr, end=" ")
-        items = query_ollama(chunk, args.model)
-        print(f"{len(items)} PII item(s) found.", file=sys.stderr)
-        all_items.extend(items)
-
-    # Collect all unique PII values before aggregation caps examples at 3
-    all_pii_values: set[str] = {
-        item["value"].strip()
-        for item in all_items
-        if isinstance(item.get("value"), str) and item["value"].strip()
-    }
-    all_pii_values.update(parse_custom_pii_values(args.custom_pii))
-
-    all_pii_values = filter_pii_values(all_pii_values)
-
-    pii_list = aggregate_results(all_items)
-
-    output = {
-        "file": args.pdf,
-        "model": args.model,
-        "total_pii_detected": len(pii_list),
-        "pii": pii_list,
-    }
-
-    json_output = json.dumps(output, indent=2, ensure_ascii=False)
-
-    if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(json_output)
-        print(f"Results written to: {args.output}", file=sys.stderr)
-    else:
-        print(json_output)
+    if args.scrub or not args.ocr_scrub:
+        all_items, all_pii_values = _detect_text_pii(args, source_pdf)
+        pii_list = aggregate_results(all_items)
+        _write_json_output(args, source_pdf, pii_list)
 
     if args.scrub:
-        pdf_path = Path(args.pdf)
-        scrubbed_path = str(pdf_path.with_stem(pdf_path.stem + "_scrubbed"))
-        print(f"Scrubbing PDF...", file=sys.stderr)
-        print(f"PII values to scrub ({len(all_pii_values)}):", file=sys.stderr)
-        for v in sorted(all_pii_values, key=len, reverse=True):
-            print(f"  {repr(v)}", file=sys.stderr)
-        pdf_ops.scrub_pdf(args.pdf, sorted(all_pii_values), scrubbed_path)
-        print(f"Scrubbed PDF saved to: {scrubbed_path}", file=sys.stderr)
+        try:
+            print(f"Scrubbing PDF...", file=sys.stderr)
+            print(f"PII values to scrub ({len(all_pii_values)}):", file=sys.stderr)
+            for v in sorted(all_pii_values, key=len, reverse=True):
+                print(f"  {repr(v)}", file=sys.stderr)
+
+            if args.ocr_scrub:
+                tmp = tempfile.NamedTemporaryFile(
+                    prefix=Path(source_pdf).stem + "_text_",
+                    suffix=".pdf",
+                    delete=False,
+                )
+                tmp.close()
+                intermediate_path = tmp.name
+                pdf_ops.scrub_pdf(
+                    source_pdf, sorted(all_pii_values), intermediate_path
+                )
+                print(
+                    f"Chaining OCR scrub on top of text-scrubbed PDF: {intermediate_path}",
+                    file=sys.stderr,
+                )
+                _run_ocr_scrub(args, intermediate_path, final_scrubbed_path)
+            else:
+                pdf_ops.scrub_pdf(
+                    source_pdf, sorted(all_pii_values), final_scrubbed_path
+                )
+                print(f"Scrubbed PDF saved to: {final_scrubbed_path}", file=sys.stderr)
+        finally:
+            if intermediate_path and os.path.exists(intermediate_path):
+                os.unlink(intermediate_path)
+
+        return
+
+    if args.ocr_scrub:
+        _run_ocr_scrub(args, source_pdf, final_scrubbed_path)
 
 
 if __name__ == "__main__":
