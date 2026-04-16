@@ -17,8 +17,6 @@ from io import BytesIO
 
 import pikepdf
 from fontTools.ttLib import TTFont
-from pdfminer.high_level import extract_pages
-from pdfminer.layout import LTChar, LTTextBox, LTTextLine, LTTextContainer
 
 
 # ── System font discovery ──────────────────────────────────────────
@@ -159,15 +157,18 @@ def _get_donor_font(embedded_font: TTFont) -> TTFont | None:
 
 def extract_text(pdf_path: str) -> list[tuple[int, str]]:
     """Extract text per page. Returns [(page_num, text), ...]."""
+    from pdfminer.high_level import extract_text as _extract_text
+    from pdfminer.pdfpage import PDFPage
+
+    # Count pages so we can extract each one individually.
+    with open(pdf_path, "rb") as f:
+        num_pages = sum(1 for _ in PDFPage.get_pages(f))
+
     pages: list[tuple[int, str]] = []
-    for page_num, page_layout in enumerate(extract_pages(pdf_path), start=1):
-        parts: list[str] = []
-        for element in page_layout:
-            if isinstance(element, LTTextContainer):
-                parts.append(element.get_text())
-        text = "".join(parts)
+    for page_idx in range(num_pages):
+        text = _extract_text(pdf_path, page_numbers=[page_idx])
         if text.strip():
-            pages.append((page_num, text))
+            pages.append((page_idx + 1, text))
     return pages
 
 
@@ -962,6 +963,30 @@ def _find_pii_spans(decoded: str, pii_values: list[str]) -> list[tuple[int, int]
     return _merge_spans(spans, decoded)
 
 
+def _find_pii_spans_per_value(decoded: str, pii_values: list[str]) -> list[tuple[int, int]]:
+    """Return matched spans keeping each PII value's matches separate.
+
+    Unlike ``_find_pii_spans`` which merges all spans globally (potentially
+    combining "PENG ZHOU" with "17835 NE 95TH CT" into one giant span),
+    this merges only within each PII value and then sorts the result.
+    """
+    all_spans: list[tuple[int, int]] = []
+    for pii in pii_values:
+        spans: list[tuple[int, int]] = []
+        start = 0
+        while start < len(decoded):
+            m = _find_pii_match(decoded, pii, start)
+            if m is None:
+                break
+            spans.append(m)
+            start = m[1]
+        if spans:
+            spans.sort()
+            all_spans.extend(_merge_spans(spans, decoded))
+    all_spans.sort()
+    return all_spans
+
+
 def _replace_pii(decoded: str, pii_values: list[str]) -> str | None:
     """Blank matched PII spans in decoded text, preserving whitespace."""
     spans = _find_pii_spans(decoded, pii_values)
@@ -1197,8 +1222,16 @@ def _collect_pii_bboxes(
     instructions: list,
     codecs: dict[str, FontCodec],
     pii_values: list[str],
+    *,
+    ignore_ctm: bool = False,
 ) -> list[tuple[float, float, float, float]]:
-    """Return PDF-space bboxes for matched PII spans before replacement."""
+    """Return bboxes for matched PII spans before replacement.
+
+    When *ignore_ctm* is True the CTM (``cm`` operators) is **not** folded
+    into the bbox coordinates.  Use this when the overlay rectangles will be
+    drawn in the same content stream (e.g. inside a Form XObject) so they
+    share the same CTM and should not be pre-transformed.
+    """
     bboxes: list[tuple[float, float, float, float]] = []
     ctm_stack: list[list[float]] = [_identity()]
     tm: list[float] = _identity()
@@ -1259,11 +1292,14 @@ def _collect_pii_bboxes(
             (x0_text, y1_text),
             (x1_text, y1_text),
         ]
-        combined = _mat_mul(tm, ctm_stack[-1])
+        if ignore_ctm:
+            mat = tm
+        else:
+            mat = _mat_mul(tm, ctm_stack[-1])
         xs: list[float] = []
         ys: list[float] = []
         for cx, cy in corners:
-            ux, uy = _apply_matrix(combined, cx, cy)
+            ux, uy = _apply_matrix(mat, cx, cy)
             xs.append(ux)
             ys.append(uy)
         return (min(xs), min(ys), max(xs), max(ys))
@@ -1291,7 +1327,7 @@ def _collect_pii_bboxes(
             max(box_a[3], box_b[3]),
         )
 
-    def collect_run_bboxes(run: list[tuple], codec: FontCodec) -> tuple[list[tuple[float, float, float, float]], list[float]]:
+    def collect_run_bboxes(run: list[tuple], codec: FontCodec) -> tuple[list[tuple[float, float, float, float]], list[float], list[float]]:
         nonlocal tm
         local_tm = list(tm)
         text_ops = {"Tj", "TJ"}
@@ -1321,8 +1357,9 @@ def _collect_pii_bboxes(
                 prev_was_text = False
 
         full_text = "".join(full_parts)
-        matched_spans = _find_pii_spans(full_text, pii_values)
+        matched_spans = _find_pii_spans_per_value(full_text, pii_values)
         if not matched_spans:
+            local_tlm = list(tlm)
             for operands, operator in run:
                 op = str(operator)
                 if op == "Tj":
@@ -1340,9 +1377,18 @@ def _collect_pii_bboxes(
                             advance = -(float(elem) / 1000.0) * font_size * (tz / 100.0)
                             local_tm = _mat_mul([1.0, 0.0, 0.0, 1.0, advance, 0.0], local_tm)
                 elif op == "Td" and len(operands) >= 2:
-                    tlm_local = _mat_mul([1.0, 0.0, 0.0, 1.0, float(operands[0]), float(operands[1])], local_tm)
-                    local_tm = list(tlm_local)
-            return [], local_tm
+                    local_tlm = _mat_mul([1.0, 0.0, 0.0, 1.0, float(operands[0]), float(operands[1])], local_tlm)
+                    local_tm = list(local_tlm)
+                elif op == "TD" and len(operands) >= 2:
+                    local_tlm = _mat_mul([1.0, 0.0, 0.0, 1.0, float(operands[0]), float(operands[1])], local_tlm)
+                    local_tm = list(local_tlm)
+                elif op == "Tm" and len(operands) == 6:
+                    local_tm = [float(x) for x in operands]
+                    local_tlm = list(local_tm)
+                elif op == "T*":
+                    local_tlm = _mat_mul([1.0, 0.0, 0.0, 1.0, 0.0, -leading], local_tlm)
+                    local_tm = list(local_tlm)
+            return [], local_tm, local_tlm
 
         origin: list[tuple[int, int | None] | None] = []
         prev_was_text = False
@@ -1448,7 +1494,7 @@ def _collect_pii_bboxes(
             else:
                 prev_was_text = False
 
-        return [bbox for bbox in run_bboxes if bbox is not None], local_tm
+        return [bbox for bbox in run_bboxes if bbox is not None], local_tm, local_tlm
 
     i = 0
     while i < len(instructions):
@@ -1543,15 +1589,91 @@ def _collect_pii_bboxes(
                         continue
                 break
             run = instructions[i:j]
-            run_bboxes, run_tm = collect_run_bboxes(run, codec)
+            run_bboxes, run_tm, run_tlm = collect_run_bboxes(run, codec)
             bboxes.extend(run_bboxes)
             tm = run_tm
+            tlm = run_tlm
             i = j
             continue
 
         i += 1
 
     return bboxes
+
+
+def _scrub_content_stream(
+    instructions: list,
+    codecs: dict[str, FontCodec],
+    pii_values: list[str],
+) -> tuple[list, bool]:
+    """Scrub PII from a list of content stream instructions.
+
+    Returns (new_instructions, modified).
+    """
+    new_instructions: list = []
+    current_font: str | None = None
+    modified = False
+
+    i = 0
+    while i < len(instructions):
+        operands, operator = instructions[i]
+        op = str(operator)
+
+        if op == "Tf" and len(operands) >= 2:
+            current_font = str(operands[0])
+
+        codec = codecs.get(current_font) if current_font else None
+
+        if op in ("Tj", "TJ") and codec:
+            text_ops = {"Tj", "TJ"}
+            pos_ops = {"Td", "TD", "T*", "Tm", "TL", "Ts", "Tw", "Tc", "Tz", "Tr"}
+            j = i
+            while j < len(instructions):
+                next_op = str(instructions[j][1])
+                if next_op in text_ops:
+                    j += 1
+                    continue
+                if next_op in pos_ops:
+                    k = j + 1
+                    while k < len(instructions) and str(instructions[k][1]) in pos_ops:
+                        k += 1
+                    if k < len(instructions) and str(instructions[k][1]) in text_ops:
+                        j = k
+                        continue
+                break
+            run = instructions[i:j]
+            replaced_run = _try_replace_run(run, codec, pii_values)
+            if replaced_run is not None:
+                new_instructions.extend(replaced_run)
+                modified = True
+            else:
+                for instr_operands, instr_operator in run:
+                    new_instructions.append(
+                        pikepdf.ContentStreamInstruction(instr_operands, instr_operator)
+                    )
+            i = j
+            continue
+
+        new_instructions.append(
+            pikepdf.ContentStreamInstruction(operands, operator)
+        )
+        i += 1
+
+    return new_instructions, modified
+
+
+def _build_codecs_for_font_dict(
+    font_dict: pikepdf.Dictionary | None,
+) -> dict[str, FontCodec]:
+    """Build FontCodec mapping from a /Font resource dictionary."""
+    if font_dict is None:
+        return {}
+    codecs: dict[str, FontCodec] = {}
+    for font_name, font_obj in font_dict.items():
+        codec = _resolve_font_codec(font_obj)
+        if codec is not None:
+            codecs[font_name] = codec
+    return codecs
 
 
 def scrub_pdf(
@@ -1562,67 +1684,46 @@ def scrub_pdf(
 
     for page_idx, page in enumerate(pdf.pages):
         codecs = _build_page_codecs(page)
+
+        # --- Scrub Form XObjects (nested content streams) ---
+        resources = page.get("/Resources")
+        if resources:
+            xobjects = resources.get("/XObject")
+            if xobjects:
+                for xname, xobj in xobjects.items():
+                    if str(xobj.get("/Subtype", "")) != "/Form":
+                        continue
+                    form_resources = xobj.get("/Resources")
+                    form_fonts = form_resources.get("/Font") if form_resources else None
+                    form_codecs = _build_codecs_for_font_dict(form_fonts)
+                    if not form_codecs:
+                        continue
+                    form_instructions = list(pikepdf.parse_content_stream(xobj))
+                    new_form, form_modified = _scrub_content_stream(
+                        form_instructions, form_codecs, pii_values
+                    )
+                    if form_modified:
+                        form_bboxes = _collect_pii_bboxes(
+                            form_instructions, form_codecs, pii_values,
+                            ignore_ctm=True,
+                        )
+                        combined = (
+                            b"q\n"
+                            + pikepdf.unparse_content_stream(new_form)
+                            + b"\nQ\n"
+                            + _rect_overlay_stream(form_bboxes)
+                        )
+                        xobj.write(combined)
+
+        # --- Scrub page-level content stream ---
         if not codecs:
             continue
 
         page.contents_coalesce()
         instructions = list(pikepdf.parse_content_stream(page))
-        new_instructions: list = []
-        current_font: str | None = None
-        modified = False
-
-        i = 0
-        while i < len(instructions):
-            operands, operator = instructions[i]
-            op = str(operator)
-
-            # Track font: <font_name> <size> Tf
-            if op == "Tf" and len(operands) >= 2:
-                current_font = str(operands[0])
-
-            codec = codecs.get(current_font) if current_font else None
-
-            # Collect a run of Tj/TJ instructions, allowing text-positioning
-            # operators (Td, TD, T*, Tm, TL, Ts) between them. PDFs often emit
-            # a space between words as a positioning move rather than an actual
-            # space glyph, so "ELIZABETH  A  DARLING" can appear as
-            # Tj("ELIZABETH") Td Tj("A") Td Tj("DARLING") — we must treat the
-            # whole sequence as one run to match across the gaps.
-            if op in ("Tj", "TJ") and codec:
-                text_ops = {"Tj", "TJ"}
-                pos_ops = {"Td", "TD", "T*", "Tm", "TL", "Ts", "Tw", "Tc", "Tz", "Tr"}
-                j = i
-                while j < len(instructions):
-                    next_op = str(instructions[j][1])
-                    if next_op in text_ops:
-                        j += 1
-                        continue
-                    if next_op in pos_ops:
-                        # Only keep extending if another Tj/TJ follows
-                        k = j + 1
-                        while k < len(instructions) and str(instructions[k][1]) in pos_ops:
-                            k += 1
-                        if k < len(instructions) and str(instructions[k][1]) in text_ops:
-                            j = k
-                            continue
-                    break
-                run = instructions[i:j]
-                replaced_run = _try_replace_run(run, codec, pii_values)
-                if replaced_run is not None:
-                    new_instructions.extend(replaced_run)
-                    modified = True
-                else:
-                    for instr_operands, instr_operator in run:
-                        new_instructions.append(
-                            pikepdf.ContentStreamInstruction(instr_operands, instr_operator)
-                        )
-                i = j
-                continue
-
-            new_instructions.append(
-                pikepdf.ContentStreamInstruction(operands, operator)
-            )
-            i += 1
+        new_instructions, modified = _scrub_content_stream(
+            instructions, codecs, pii_values
+        )
 
         if modified:
             bboxes = _collect_pii_bboxes(instructions, codecs, pii_values)

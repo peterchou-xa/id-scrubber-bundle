@@ -31,6 +31,7 @@ import pytesseract
 
 from pdf_ops import (
     FontCodec,
+    _build_codecs_for_font_dict,
     _build_page_codecs,
     _ensure_mask_chars_in_fonts,
     mask_pii_value,
@@ -251,26 +252,35 @@ def _apply_matrix(m: list[float], x: float, y: float) -> tuple[float, float]:
 
 
 def redact_content_stream(
-    page: pikepdf.Page,
+    page_or_stream,
     codecs: dict[str, FontCodec],
     pii_bboxes: list[tuple[float, float, float, float]],
     pii_mask_values: list[str],
+    *,
+    parent_ctm: list[float] | None = None,
 ) -> tuple[list, list, bool]:
     """Walk the content stream and mask every Tj/TJ whose rendered bbox
     overlaps any PII bbox. Returns (original_instructions, new_instructions,
-    modified)."""
+    modified).
+
+    *parent_ctm*, when supplied, is pre-multiplied into the initial CTM so
+    that bbox calculations for content inside Form XObjects are in page-space
+    and can be compared against page-space OCR bboxes.
+    """
 
     if not pii_bboxes:
-        orig = list(pikepdf.parse_content_stream(page))
+        orig = list(pikepdf.parse_content_stream(page_or_stream))
         return orig, orig, False
 
-    page.contents_coalesce()
-    orig_instructions = list(pikepdf.parse_content_stream(page))
+    if isinstance(page_or_stream, pikepdf.Page):
+        page_or_stream.contents_coalesce()
+    orig_instructions = list(pikepdf.parse_content_stream(page_or_stream))
     new_instructions: list = []
     modified = False
 
     # Graphics-state stack for CTM.
-    ctm_stack: list[list[float]] = [_identity()]
+    initial_ctm = list(parent_ctm) if parent_ctm is not None else _identity()
+    ctm_stack: list[list[float]] = [initial_ctm]
 
     # Text state.
     tm: list[float] = _identity()
@@ -366,7 +376,36 @@ def redact_content_stream(
                 start = None
         if start is not None:
             spans.append((start, len(decoded)))
-        return spans
+
+        if not spans:
+            return spans
+
+        # OCR bboxes are often slightly narrower than PDF glyph extents,
+        # leaving trailing (or leading) characters just outside the PII
+        # bbox.  When a matched span abuts the edge of the decoded string,
+        # extend it to include any remaining non-space characters on that
+        # side — they almost certainly belong to the same PII value.
+        last_non_space = len(decoded) - 1
+        while last_non_space >= 0 and decoded[last_non_space].isspace():
+            last_non_space -= 1
+        first_non_space = 0
+        while first_non_space < len(decoded) and decoded[first_non_space].isspace():
+            first_non_space += 1
+
+        extended: list[tuple[int, int]] = []
+        for s, e in spans:
+            # If the span's end is near the last non-space char (within a
+            # small gap of spaces or 1-2 chars), extend to the end.
+            if e > last_non_space:
+                e = len(decoded)
+            elif e >= last_non_space - 1:
+                e = last_non_space + 1
+            # Similarly for the start.
+            if s <= first_non_space + 1:
+                s = first_non_space
+            extended.append((s, e))
+
+        return extended
 
     def expand_replaced_segment(orig_str: str, codec: FontCodec) -> tuple[list, bool]:
         spans = overlap_spans(orig_str, codec)
@@ -513,8 +552,6 @@ def redact_content_stream(
             new_arr: list = []
             local_modified = False
 
-            # Compute bbox for the whole TJ, then decide per-element.
-            # Simpler: check each String element independently.
             for elem in arr:
                 if isinstance(elem, pikepdf.String) and codec is not None:
                     raw = bytes(elem)
@@ -523,16 +560,11 @@ def redact_content_stream(
                     if hit:
                         new_arr.extend(replaced_parts)
                         local_modified = True
-                        width = codec.glyph_width_sum(raw)
-                        advance_tm(width, len(decoded), decoded.count(" "))
                     else:
                         new_arr.append(elem)
-                        width = codec.glyph_width_sum(raw)
-                        decoded = codec.decode(raw)
-                        advance_tm(width, len(decoded), decoded.count(" "))
+                    width = codec.glyph_width_sum(raw)
+                    advance_tm(width, len(decoded), decoded.count(" "))
                 elif isinstance(elem, (int, float, Decimal)):
-                    # Number in TJ array: negative = advance right; number is
-                    # in thousandths of an em and negated.
                     adj = float(elem)
                     advance = -(adj / 1000.0) * font_size * (tz / 100.0)
                     tm = _mat_mul([1.0, 0.0, 0.0, 1.0, advance, 0.0], tm)
@@ -570,6 +602,34 @@ def _rect_overlay_stream(
     return b"".join(parts)
 
 
+def _collect_form_ctms(
+    page: pikepdf.Page,
+) -> dict[str, list[float]]:
+    """Walk the page content stream and return the CTM active at each ``Do``.
+
+    Returns {"/XObjectName": ctm_at_Do_time}.
+    """
+    page.contents_coalesce()
+    instructions = list(pikepdf.parse_content_stream(page))
+    ctm_stack: list[list[float]] = [_identity()]
+    result: dict[str, list[float]] = {}
+
+    for operands, operator in instructions:
+        op = str(operator)
+        if op == "q":
+            ctm_stack.append(list(ctm_stack[-1]))
+        elif op == "Q" and len(ctm_stack) > 1:
+            ctm_stack.pop()
+        elif op == "cm" and len(operands) == 6:
+            m = [float(x) for x in operands]
+            ctm_stack[-1] = _mat_mul(m, ctm_stack[-1])
+        elif op == "Do" and operands:
+            name = str(operands[0])
+            result[name] = list(ctm_stack[-1])
+
+    return result
+
+
 # ── Top-level entry ────────────────────────────────────────────────
 
 def scrub_with_ocr(
@@ -589,7 +649,6 @@ def scrub_with_ocr(
         mask_chars.update(mask_pii_value(pii))
 
     pdf = pikepdf.open(pdf_path)
-    page_instr_cache: dict[int, tuple[list, list]] = {}
 
     for page_idx, page in enumerate(pdf.pages):
         page_num = page_idx + 1
@@ -598,6 +657,38 @@ def scrub_with_ocr(
             continue
 
         _ensure_mask_chars_in_fonts(page, pdf, mask_chars)
+
+        # --- Scrub Form XObjects (nested content streams) ---
+        resources = page.get("/Resources")
+        if resources:
+            xobjects = resources.get("/XObject")
+            if xobjects:
+                # Walk page content stream to find the CTM at each Do.
+                form_ctms = _collect_form_ctms(page)
+                for xname, xobj in xobjects.items():
+                    if str(xobj.get("/Subtype", "")) != "/Form":
+                        continue
+                    form_resources = xobj.get("/Resources")
+                    form_fonts = (
+                        form_resources.get("/Font") if form_resources else None
+                    )
+                    form_codecs = _build_codecs_for_font_dict(form_fonts)
+                    if not form_codecs:
+                        continue
+                    parent_ctm = form_ctms.get(xname)
+                    _, new_form, form_modified = redact_content_stream(
+                        xobj,
+                        form_codecs,
+                        bboxes,
+                        pii_values,
+                        parent_ctm=parent_ctm,
+                    )
+                    if form_modified:
+                        xobj.write(
+                            pikepdf.unparse_content_stream(new_form),
+                        )
+
+        # --- Scrub page-level content stream ---
         codecs = _build_page_codecs(page)
         if not codecs:
             # No decodable fonts → still draw rectangles, skip text layer.
@@ -610,13 +701,11 @@ def scrub_with_ocr(
             )
             continue
 
-        orig, new, modified = redact_content_stream(page, codecs, bboxes, pii_values)
+        orig, new, modified = redact_content_stream(
+            page, codecs, bboxes, pii_values
+        )
         overlay = _rect_overlay_stream(bboxes)
 
-        # Wrap the original content in q/Q so any unbalanced top-level CTM
-        # (common in PDFs derived from scans/images, where the page uses a
-        # flipped-y / scaled coordinate space) is scoped, and our overlay
-        # rectangles are drawn in raw MediaBox coordinates.
         combined = (
             b"q\n"
             + pikepdf.unparse_content_stream(new)
@@ -624,8 +713,6 @@ def scrub_with_ocr(
             + overlay
         )
         page.Contents = pdf.make_stream(combined)
-        if modified:
-            page_instr_cache[page_num] = (orig, new)
 
     pdf.save(output_path)
     pdf.close()

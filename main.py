@@ -241,6 +241,7 @@ def _detect_text_pii(args, pdf_path: str) -> tuple[list[dict], set[str]]:
     full_text = extract_text_from_pdf(pdf_path)
     print(f"Extracted {len(full_text):,} characters.", file=sys.stderr)
 
+    print("text full text: ", full_text)
     chunks = chunk_text(full_text, args.chunk_size)
     print(f"Processing {len(chunks)} chunk(s) with model '{args.model}'...", file=sys.stderr)
 
@@ -287,7 +288,7 @@ def _run_ocr_scrub(args, input_pdf: str, output_pdf: str) -> bool:
 
     full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
     ## TODO delete
-    print("ocr full text: ", full_text)
+    # print("ocr full text: ", full_text)
     print(f"OCR extracted {len(full_text):,} characters.", file=sys.stderr)
 
     chunks = chunk_text(full_text, args.chunk_size)
