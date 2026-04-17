@@ -269,7 +269,7 @@ def _run_ocr_scrub(args, input_pdf: str, output_pdf: str) -> bool:
         return False
 
     print(f"Redacting PDF (rasterizing at {args.ocr_dpi} DPI)...", file=sys.stderr)
-    ocr_scrub.scrub_with_ocr(input_pdf, page_bboxes, pii_list_sorted, output_pdf, dpi=args.ocr_dpi)
+    ocr_scrub.scrub_with_ocr(input_pdf, page_bboxes, output_pdf, dpi=args.ocr_dpi)
     print(f"Scrubbed PDF saved to: {output_pdf}", file=sys.stderr)
     return True
 

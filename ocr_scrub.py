@@ -265,25 +265,22 @@ def find_pii_bboxes(
 
 # ── Top-level entry ────────────────────────────────────────────────
 
-def scrub_with_ocr(
+def render_redacted_pages(
     pdf_path: str,
     page_pii_bboxes: dict[int, list[tuple[float, float, float, float]]],
-    pii_values: list[str],
-    output_path: str,
     dpi: int = DEFAULT_DPI,
-) -> None:
-    """Redact PDF by drawing on rasterized page images, then saving as PDF.
+) -> list:
+    """Render each page and draw black rectangles over PII regions.
 
-    1. Render each page to a PIL image at the given DPI.
-    2. For pages with PII bboxes, draw black rectangles on the image.
-    3. Save all page images as a single image-only PDF.
-
-    page_pii_bboxes: {page_num (1-based): [(x0,y0,x1,y1), ...]} in PDF points.
+    Returns a list of (page_num, PIL.Image) tuples — one per page.
+    Images are RGB with redaction rectangles already drawn.
     """
-    pdf = pdfium.PdfDocument(pdf_path)
-    scale = dpi / 72.0  # PDF points → pixels
+    from PIL import Image
 
-    page_images = []
+    pdf = pdfium.PdfDocument(pdf_path)
+    scale = dpi / 72.0
+
+    results: list[tuple[int, Image.Image]] = []
     for page_idx in range(len(pdf)):
         page_num = page_idx + 1
         page = pdf[page_idx]
@@ -295,23 +292,36 @@ def scrub_with_ocr(
         if bboxes:
             draw = ImageDraw.Draw(img)
             for x0, y0, x1, y1 in bboxes:
-                # Convert PDF user-space (bottom-left origin) to image pixels
-                # (top-left origin).
                 px_x0 = x0 * scale
                 px_x1 = x1 * scale
-                px_y0 = img_h - y1 * scale  # PDF top → image top
-                px_y1 = img_h - y0 * scale  # PDF bottom → image bottom
+                px_y0 = img_h - y1 * scale
+                px_y1 = img_h - y0 * scale
                 draw.rectangle([px_x0, px_y0, px_x1, px_y1], fill="black")
 
-        page_images.append(img.convert("RGB"))
+        results.append((page_num, img.convert("RGB")))
 
-    # Save all pages as a single PDF.
-    if page_images:
-        page_images[0].save(
-            output_path,
-            "PDF",
-            resolution=dpi,
-            save_all=True,
-            append_images=page_images[1:],
-        )
     pdf.close()
+    return results
+
+
+def scrub_with_ocr(
+    pdf_path: str,
+    page_pii_bboxes: dict[int, list[tuple[float, float, float, float]]],
+    output_path: str,
+    dpi: int = DEFAULT_DPI,
+) -> None:
+    """Redact PDF by drawing on rasterized page images, then saving as PDF.
+
+    page_pii_bboxes: {page_num (1-based): [(x0,y0,x1,y1), ...]} in PDF points.
+    """
+    pages = render_redacted_pages(pdf_path, page_pii_bboxes, dpi=dpi)
+    if not pages:
+        return
+    images = [img for _, img in pages]
+    images[0].save(
+        output_path,
+        "PDF",
+        resolution=dpi,
+        save_all=True,
+        append_images=images[1:],
+    )
