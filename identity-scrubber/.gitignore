@@ -1,0 +1,22 @@
+# Python venv (created with: python -m venv .)
+bin/
+include/
+lib/
+pyvenv.cfg
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Scrubbed output PDFs
+*_scrubbed.pdf
+
+# Env / secrets
+.env
+
+# macOS
+.DS_Store
