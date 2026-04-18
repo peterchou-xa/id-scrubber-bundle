@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import path from 'path';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
 import {
@@ -16,9 +16,9 @@ let installInFlight = false;
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 720,
-    height: 560,
-    resizable: false,
+    width: 1200,
+    height: 800,
+    resizable: true,
     show: false,
     title: 'Identity Scrubber',
     webPreferences: {
@@ -93,6 +93,17 @@ app.whenReady().then(() => {
     } catch (err) {
       return { ok: false, error: (err as Error).message, input };
     }
+  });
+
+  ipcMain.handle('dialog:openPdf', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: 'Select PDF File',
+      properties: ['openFile'],
+      filters: [{ name: 'PDF Documents', extensions: ['pdf'] }],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    const filePath = result.filePaths[0];
+    return { path: filePath, name: path.basename(filePath) };
   });
 
   ipcMain.handle('ollama:start', async () => {

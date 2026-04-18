@@ -54,3 +54,13 @@ const scrubberApi = {
 export type ScrubberApi = typeof scrubberApi;
 
 contextBridge.exposeInMainWorld('scrubber', scrubberApi);
+
+export type PickedPdf = { path: string; name: string } | null;
+
+const dialogApi = {
+  openPdf: (): Promise<PickedPdf> => ipcRenderer.invoke('dialog:openPdf'),
+};
+
+export type DialogApi = typeof dialogApi;
+
+contextBridge.exposeInMainWorld('dialogApi', dialogApi);

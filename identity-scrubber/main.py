@@ -221,7 +221,10 @@ def _run_ocr_scrub(args, input_pdf: str, output_pdf: str) -> bool:
         backend = "tesseract"
 
     print(f"Rendering and OCR-ing pages at {args.ocr_dpi} DPI using {backend}...", file=sys.stderr)
-    pages = ocr_scrub.ocr_pdf(input_pdf, dpi=args.ocr_dpi)
+    ocr_kwargs = {"dpi": args.ocr_dpi}
+    if args.rapidocr:
+        ocr_kwargs["det_model"] = args.rapidocr_det_model
+    pages = ocr_scrub.ocr_pdf(input_pdf, **ocr_kwargs)
     print(f"  {len(pages)} page(s), {sum(len(p.words) for p in pages)} word(s) total.", file=sys.stderr)
 
     full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
@@ -326,6 +329,15 @@ def main():
             "Use RapidOCR (ONNX Runtime) instead of Tesseract. "
             "No native binary dependency; bboxes are estimated per-word "
             "from line-level detections."
+        ),
+    )
+    parser.add_argument(
+        "--rapidocr-det-model",
+        choices=("mobile", "server"),
+        default="mobile",
+        help=(
+            "RapidOCR text detector variant. 'server' has higher recall on "
+            "thin/small text at ~3x the latency."
         ),
     )
     args = parser.parse_args()

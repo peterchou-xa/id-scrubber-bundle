@@ -20,23 +20,36 @@ from PIL import ImageDraw
 DEFAULT_DPI = 300
 
 _ENGINE = None
+_ENGINE_DET_MODEL: str | None = None
 
 # The default Chinese recognizer doesn't emit spaces between Latin words,
 # so "ELIZABETH A DARLING" comes back as "ELIZABETHADARLING". Switching the
 # recognizer to the English PP-OCRv4 model preserves whitespace.
 
 
-def _get_engine():
-    global _ENGINE
-    if _ENGINE is None:
-        try:
-            from rapidocr import RapidOCR
-        except ImportError as exc:
-            raise ImportError(
-                "rapidocr not installed. Run: pip install rapidocr onnxruntime"
-            ) from exc
-        from rapidocr import LangRec
-        _ENGINE = RapidOCR(params={"Rec.lang_type": LangRec.EN})
+def _get_engine(det_model: str = "mobile"):
+    global _ENGINE, _ENGINE_DET_MODEL
+    if _ENGINE is not None and _ENGINE_DET_MODEL == det_model:
+        return _ENGINE
+    try:
+        from rapidocr import RapidOCR
+    except ImportError as exc:
+        raise ImportError(
+            "rapidocr not installed. Run: pip install rapidocr onnxruntime"
+        ) from exc
+    from rapidocr import LangRec, ModelType
+    model_type = ModelType.SERVER if det_model == "server" else ModelType.MOBILE
+    _ENGINE = RapidOCR(params={
+        "Rec.lang_type": LangRec.EN,
+        "Det.model_type": model_type,
+        # Defaults (0.3 / 0.5 / 1.6) miss thin light text like small-font
+        # contact lines on resumes. Loosen them so the detector keeps
+        # marginal regions; recognition-side confidence still filters noise.
+        "Det.thresh": 0.2,
+        "Det.box_thresh": 0.3,
+        "Det.unclip_ratio": 2.0,
+    })
+    _ENGINE_DET_MODEL = det_model
     return _ENGINE
 
 
@@ -61,11 +74,11 @@ class PageOcr:
     page_height: float
 
 
-def ocr_pdf(pdf_path: str, dpi: int = DEFAULT_DPI) -> list[PageOcr]:
+def ocr_pdf(pdf_path: str, dpi: int = DEFAULT_DPI, det_model: str = "mobile") -> list[PageOcr]:
     """Render each page and OCR with RapidOCR. Bboxes in PDF user-space points."""
     import numpy as np
 
-    engine = _get_engine()
+    engine = _get_engine(det_model)
     pdf = pdfium.PdfDocument(pdf_path)
     pages: list[PageOcr] = []
 

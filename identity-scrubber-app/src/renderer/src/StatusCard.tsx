@@ -19,10 +19,8 @@ function formatBytes(bytes?: number): string {
 }
 
 export function StatusCard({ state, onInstall, onRetry }: Props): JSX.Element {
-  const isError = state.stage === 'error';
-
   return (
-    <section className={`card${isError ? ' error' : ''}`}>
+    <section className="bg-card border border-border rounded-xl shadow-sm p-6 flex flex-col gap-4">
       <StatusText state={state} />
       <StatusProgress state={state} />
       <StatusHint state={state} />
@@ -32,6 +30,7 @@ export function StatusCard({ state, onInstall, onRetry }: Props): JSX.Element {
 }
 
 function StatusText({ state }: { state: SetupState }): JSX.Element {
+  const isError = state.stage === 'error';
   const text = ((): string => {
     switch (state.stage) {
       case 'checking':
@@ -51,7 +50,11 @@ function StatusText({ state }: { state: SetupState }): JSX.Element {
     }
   })();
 
-  return <div className="status-text">{text}</div>;
+  return (
+    <div className={`text-base font-medium ${isError ? 'text-primary' : 'text-foreground'}`}>
+      {text}
+    </div>
+  );
 }
 
 function StatusProgress({ state }: { state: SetupState }): JSX.Element | null {
@@ -86,7 +89,7 @@ function StatusHint({ state }: { state: SetupState }): JSX.Element | null {
   })();
 
   if (!hint) return null;
-  return <p className="hint">{hint}</p>;
+  return <p className="text-xs text-muted-foreground m-0">{hint}</p>;
 }
 
 function StatusActions({
@@ -100,8 +103,11 @@ function StatusActions({
 }): JSX.Element | null {
   if (state.stage === 'idle') {
     return (
-      <div className="actions">
-        <button className="primary" onClick={onInstall}>
+      <div className="flex justify-end gap-3">
+        <button
+          onClick={onInstall}
+          className="px-4 py-2 bg-primary hover:bg-primary/90 text-primary-foreground text-sm font-medium rounded-lg transition-colors"
+        >
           Install
         </button>
       </div>
@@ -109,8 +115,11 @@ function StatusActions({
   }
   if (state.stage === 'error') {
     return (
-      <div className="actions">
-        <button className="secondary" onClick={onRetry}>
+      <div className="flex justify-end gap-3">
+        <button
+          onClick={onRetry}
+          className="px-4 py-2 bg-secondary hover:bg-secondary/80 text-secondary-foreground text-sm font-medium rounded-lg transition-colors"
+        >
           Retry
         </button>
       </div>
