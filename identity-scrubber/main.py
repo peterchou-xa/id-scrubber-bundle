@@ -99,11 +99,7 @@ def query_ollama(text_chunk: str, model: str) -> list[dict]:
                 options={"temperature": 0},
             )
         else:
-            print(f"Warning: Ollama error on chunk: {exc}", file=sys.stderr)
-            return []
-    except Exception as exc:
-        print(f"Warning: Unexpected error querying Ollama: {exc}", file=sys.stderr)
-        return []
+            raise RuntimeError(f"Ollama error on chunk: {exc}") from exc
 
     raw = response["message"]["content"].strip()
 

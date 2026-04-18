@@ -1,0 +1,56 @@
+import { contextBridge, ipcRenderer } from 'electron';
+
+export type OllamaStatus = {
+  installed: boolean;
+  location: string | null;
+  running: boolean;
+};
+
+export type OllamaInstallResult =
+  | { ok: true; location: string; reinstalled: boolean }
+  | { ok: false; error: string };
+
+export type OllamaStartResult =
+  | { ok: true; alreadyRunning: boolean }
+  | { ok: false; error: string };
+
+export type ProgressPayload =
+  | { stage: 'downloading'; percent: number; received?: number; total?: number }
+  | { stage: 'installing'; step: 'mount' | 'copy' | 'quarantine' }
+  | { stage: 'starting'; location?: string }
+  | { stage: 'done'; location: string }
+  | { stage: 'error'; message: string };
+
+const ollamaApi = {
+  getStatus: (): Promise<OllamaStatus> => ipcRenderer.invoke('ollama:status'),
+  install: (): Promise<OllamaInstallResult> => ipcRenderer.invoke('ollama:install'),
+  start: (): Promise<OllamaStartResult> => ipcRenderer.invoke('ollama:start'),
+  onProgress: (callback: (payload: ProgressPayload) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: ProgressPayload): void =>
+      callback(payload);
+    ipcRenderer.on('ollama:progress', listener);
+    return () => ipcRenderer.removeListener('ollama:progress', listener);
+  },
+};
+
+export type OllamaApi = typeof ollamaApi;
+
+contextBridge.exposeInMainWorld('ollama', ollamaApi);
+
+export type ScrubberResult =
+  | { ok: true; code: number | null; stdout: string; stderr: string; input: string }
+  | { ok: false; code?: number | null; stdout?: string; stderr?: string; error?: string; input: string };
+
+const scrubberApi = {
+  run: (pdfPath?: string): Promise<ScrubberResult> =>
+    ipcRenderer.invoke('scrubber:run', pdfPath),
+  onLog: (callback: (chunk: string) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, chunk: string): void => callback(chunk);
+    ipcRenderer.on('scrubber:log', listener);
+    return () => ipcRenderer.removeListener('scrubber:log', listener);
+  },
+};
+
+export type ScrubberApi = typeof scrubberApi;
+
+contextBridge.exposeInMainWorld('scrubber', scrubberApi);
