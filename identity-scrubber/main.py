@@ -217,15 +217,20 @@ def _write_json_output(args, file_path: str, pii_list: list[dict]) -> None:
 
 def _run_ocr_scrub(args, input_pdf: str, output_pdf: str) -> bool:
     """OCR-based scrub flow: render → OCR → LLM → bbox → redact."""
-    import ocr_scrub
+    if args.rapidocr:
+        import rapidocr_scrub as ocr_scrub
+        backend = "rapidocr"
+    else:
+        import ocr_scrub
+        backend = "tesseract"
 
-    print(f"Rendering and OCR-ing pages at {args.ocr_dpi} DPI...", file=sys.stderr)
+    print(f"Rendering and OCR-ing pages at {args.ocr_dpi} DPI using {backend}...", file=sys.stderr)
     pages = ocr_scrub.ocr_pdf(input_pdf, dpi=args.ocr_dpi)
     print(f"  {len(pages)} page(s), {sum(len(p.words) for p in pages)} word(s) total.", file=sys.stderr)
 
     full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
     ## TODO delete
-    # print("ocr full text: ", full_text)
+    print("ocr full text: ", full_text)
     print(f"OCR extracted {len(full_text):,} characters.", file=sys.stderr)
 
     chunks = chunk_text(full_text, args.chunk_size)
@@ -315,8 +320,17 @@ def main():
     parser.add_argument(
         "--ocr-dpi",
         type=int,
-        default=300,
+        default=600,
         help="DPI used when rendering pages for OCR.",
+    )
+    parser.add_argument(
+        "--rapidocr",
+        action="store_true",
+        help=(
+            "Use RapidOCR (ONNX Runtime) instead of Tesseract. "
+            "No native binary dependency; bboxes are estimated per-word "
+            "from line-level detections."
+        ),
     )
     args = parser.parse_args()
 
