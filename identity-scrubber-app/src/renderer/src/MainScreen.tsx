@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 type AppState = 'empty' | 'detected' | 'scrubbed';
 
@@ -9,11 +9,12 @@ interface PIIItem {
   checked: boolean;
 }
 
-const mockPIIData: PIIItem[] = [
-  { type: 'Address', value: '94444 223 NE, Jackson, IH, 98840', count: 10, checked: true },
-  { type: 'SSN', value: '988-444-3444', count: 2, checked: true },
-  { type: 'Name', value: 'Peter Chou', count: 1, checked: true },
-];
+function formatType(t: string): string {
+  return t
+    .split('_')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
 
 function Icon({ path, className }: { path: string; className?: string }): JSX.Element {
   return (
@@ -47,7 +48,9 @@ export function MainScreen(): JSX.Element {
   const [selectedFile, setSelectedFile] = useState<string>('');
   const [selectedFilePath, setSelectedFilePath] = useState<string>('');
   const [isScanning, setIsScanning] = useState(false);
+  const [isScrubbing, setIsScrubbing] = useState(false);
   const [piiItems, setPiiItems] = useState<PIIItem[]>([]);
+  const [scrubbedPath, setScrubbedPath] = useState<string>('');
 
   const handleFileSelect = async (): Promise<void> => {
     const picked = await window.dialogApi.openPdf();
@@ -57,26 +60,51 @@ export function MainScreen(): JSX.Element {
     }
   };
 
+  useEffect(() => {
+    const off = window.scrubber.onEvent((evt) => {
+      if (evt.cmd !== 'detect') return;
+      if (evt.event === 'pii') {
+        const item = evt.item as { type: string; value: string } | undefined;
+        if (!item) return;
+        setPiiItems((prev) => {
+          const existing = prev.find((p) => p.value === item.value && p.type === item.type);
+          if (existing) {
+            return prev.map((p) =>
+              p === existing ? { ...p, count: p.count + 1 } : p,
+            );
+          }
+          return [...prev, { type: item.type, value: item.value, count: 1, checked: true }];
+        });
+      } else if (evt.event === 'done') {
+        const pii = (evt.pii as { type: string; value: string; occurrences: number }[]) ?? [];
+        setPiiItems((prev) =>
+          pii.map((p) => {
+            const prior = prev.find((x) => x.value === p.value && x.type === p.type);
+            return {
+              type: p.type,
+              value: p.value,
+              count: p.occurrences,
+              checked: prior?.checked ?? true,
+            };
+          }),
+        );
+        setIsScanning(false);
+        setAppState('detected');
+      }
+    });
+    return off;
+  }, []);
+
   const handleDetect = (): void => {
+    if (!selectedFilePath) return;
     setIsScanning(true);
     setPiiItems([]);
-    if (selectedFilePath) {
-      window.scrubber
-        .run(selectedFilePath)
-        .then((result) => {
-          console.log('scrubber result:', result);
-        })
-        .catch((err) => {
-          console.error('scrubber error:', err);
-        });
-    }
-    setTimeout(() => setPiiItems([mockPIIData[2]]), 500);
-    setTimeout(() => setPiiItems([mockPIIData[2], mockPIIData[1]]), 1200);
-    setTimeout(() => {
-      setPiiItems(mockPIIData);
-      setIsScanning(false);
-      setAppState('detected');
-    }, 2000);
+    window.scrubber.detect(selectedFilePath).then((res) => {
+      if (!res.ok) {
+        console.error('detect error:', res.error);
+        setIsScanning(false);
+      }
+    });
   };
 
   const handleTogglePII = (index: number): void => {
@@ -85,8 +113,26 @@ export function MainScreen(): JSX.Element {
     );
   };
 
-  const handleScrub = (): void => {
-    setAppState('scrubbed');
+  const handleScrub = async (): Promise<void> => {
+    const selected = piiItems.filter((p) => p.checked).map((p) => p.value);
+    if (selected.length === 0) return;
+    setIsScrubbing(true);
+    try {
+      const res = await window.scrubber.scrub(selected);
+      if (res.ok) {
+        const output = (res.result.output as string) ?? '';
+        setScrubbedPath(output);
+        setAppState('scrubbed');
+      } else {
+        console.error('scrub error:', res.error);
+      }
+    } finally {
+      setIsScrubbing(false);
+    }
+  };
+
+  const handleOpenScrubbed = (): void => {
+    if (scrubbedPath) window.dialogApi.openPath(scrubbedPath);
   };
 
   const handleReset = (): void => {
@@ -95,6 +141,8 @@ export function MainScreen(): JSX.Element {
     setSelectedFilePath('');
     setPiiItems([]);
     setIsScanning(false);
+    setIsScrubbing(false);
+    setScrubbedPath('');
   };
 
   return (
@@ -118,7 +166,9 @@ export function MainScreen(): JSX.Element {
         <button
           onClick={() => {
             setSelectedFile('confidential_document.pdf');
-            setPiiItems(mockPIIData);
+            setPiiItems([
+              { type: 'full_name', value: 'Peter Chou', count: 1, checked: true },
+            ]);
             setAppState('detected');
           }}
           className="px-3 py-1.5 bg-card text-xs rounded-lg border border-border hover:bg-secondary shadow-sm transition-colors font-medium"
@@ -152,7 +202,7 @@ export function MainScreen(): JSX.Element {
           <div className="h-px bg-gradient-to-r from-primary via-primary/30 to-transparent mt-4" />
         </div>
 
-        <div className="flex-1 flex gap-6">
+        <div className="flex-1 min-h-0 flex gap-6">
           {/* Left Panel */}
           <div className="w-72 bg-card border border-border rounded-xl shadow-sm p-4 flex flex-col gap-4">
             <div>
@@ -221,10 +271,13 @@ export function MainScreen(): JSX.Element {
                 </label>
                 <button
                   onClick={handleScrub}
-                  className="w-full px-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all flex items-center justify-center gap-2 relative overflow-hidden group"
+                  disabled={isScrubbing || piiItems.filter((p) => p.checked).length === 0}
+                  className="w-full px-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2 relative overflow-hidden group"
                 >
                   <Icon path={ICONS.alertTriangle} className="w-4 h-4" />
-                  <span className="font-medium">Execute Scrub</span>
+                  <span className="font-medium">
+                    {isScrubbing ? 'Scrubbing...' : 'Execute Scrub'}
+                  </span>
                 </button>
                 <p className="text-xs text-muted-foreground mt-2 text-center">
                   This will create a new sanitized file
@@ -240,9 +293,12 @@ export function MainScreen(): JSX.Element {
                   <p className="text-sm text-muted-foreground mb-4">
                     All selected PII has been removed
                   </p>
-                  <button className="px-4 py-2 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all flex items-center justify-center gap-2 mx-auto">
+                  <button
+                    onClick={handleOpenScrubbed}
+                    className="px-4 py-2 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all flex items-center justify-center gap-2 mx-auto"
+                  >
                     <Icon path={ICONS.download} className="w-4 h-4" />
-                    <span className="text-sm font-medium">Download File</span>
+                    <span className="text-sm font-medium">Open File</span>
                   </button>
                   <button
                     onClick={handleReset}
@@ -269,7 +325,7 @@ export function MainScreen(): JSX.Element {
           </div>
 
           {/* Right Panel */}
-          <div className="flex-1 bg-card border border-border rounded-xl shadow-sm p-6 flex flex-col">
+          <div className="flex-1 min-h-0 bg-card border border-border rounded-xl shadow-sm p-6 flex flex-col">
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold text-lg">Detection Results</h2>
               {(piiItems.length > 0 || isScanning) && (
@@ -296,46 +352,48 @@ export function MainScreen(): JSX.Element {
             )}
 
             {(piiItems.length > 0 || isScanning) && appState !== 'scrubbed' && (
-              <div className="flex-1 flex flex-col gap-3">
-                {piiItems.map((item, index) => (
-                  <div
-                    key={item.type}
-                    className="bg-secondary border border-border rounded-lg p-4 hover:border-primary/50 hover:shadow-sm transition-all"
-                  >
-                    <div className="flex items-start gap-4">
-                      <input
-                        type="checkbox"
-                        checked={item.checked}
-                        onChange={() => handleTogglePII(index)}
-                        className="mt-1 w-5 h-5 accent-primary cursor-pointer"
-                      />
-                      <div className="flex-1">
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center gap-3">
-                            <span className="text-sm text-primary font-semibold">{item.type}</span>
-                            <div className="px-2 py-0.5 bg-primary/10 border border-primary/30 rounded">
-                              <span className="text-xs text-primary font-medium">
-                                {item.count} occurrence{item.count > 1 ? 's' : ''}
-                              </span>
+              <div className="flex-1 flex flex-col min-h-0">
+                <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 pr-1">
+                  {piiItems.map((item, index) => (
+                    <div
+                      key={`${item.type}:${item.value}`}
+                      className="bg-secondary border border-border rounded-lg p-4 hover:border-primary/50 hover:shadow-sm transition-all"
+                    >
+                      <div className="flex items-start gap-4">
+                        <input
+                          type="checkbox"
+                          checked={item.checked}
+                          onChange={() => handleTogglePII(index)}
+                          className="mt-1 w-5 h-5 accent-primary cursor-pointer"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-3">
+                              <span className="text-sm text-primary font-semibold">{formatType(item.type)}</span>
+                              <div className="px-2 py-0.5 bg-primary/10 border border-primary/30 rounded">
+                                <span className="text-xs text-primary font-medium">
+                                  {item.count} occurrence{item.count > 1 ? 's' : ''}
+                                </span>
+                              </div>
                             </div>
                           </div>
+                          <p className="text-foreground/70 break-words">{item.value}</p>
                         </div>
-                        <p className="text-foreground/70">{item.value}</p>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
 
-                {isScanning && (
-                  <div className="bg-secondary/50 border border-border border-dashed rounded-lg p-4 flex items-center gap-3">
-                    <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                    <span className="text-sm text-muted-foreground">
-                      Analyzing document for PII...
-                    </span>
-                  </div>
-                )}
+                  {isScanning && (
+                    <div className="bg-secondary/50 border border-border border-dashed rounded-lg p-4 flex items-center gap-3">
+                      <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                      <span className="text-sm text-muted-foreground">
+                        Analyzing document for PII...
+                      </span>
+                    </div>
+                  )}
+                </div>
 
-                <div className="mt-auto pt-4 border-t border-border">
+                <div className="pt-4 mt-4 border-t border-border">
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span>Total PII types detected: {piiItems.length}</span>
                     <span>
@@ -359,7 +417,13 @@ export function MainScreen(): JSX.Element {
                   </p>
                   <div className="bg-secondary border border-border rounded-lg p-4 max-w-md">
                     <p className="text-xs text-muted-foreground mb-2 font-medium">Output file:</p>
-                    <p className="text-sm text-primary">confidential_document_SCRUBBED.pdf</p>
+                    <button
+                      onClick={handleOpenScrubbed}
+                      className="text-sm text-primary hover:underline break-all text-left"
+                      title={scrubbedPath}
+                    >
+                      {scrubbedPath ? scrubbedPath.split('/').pop() : ''}
+                    </button>
                   </div>
                 </div>
               </div>

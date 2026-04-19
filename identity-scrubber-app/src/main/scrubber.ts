@@ -1,52 +1,140 @@
-import { spawn } from 'child_process';
+import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import path from 'path';
 import { app } from 'electron';
+import { EventEmitter } from 'events';
 
-export interface ScrubberResult {
-  ok: boolean;
-  code: number | null;
-  stdout: string;
-  stderr: string;
-}
+export type ServeEvent = Record<string, unknown> & { event: string; cmd?: string };
 
 function binaryPath(): string {
-  // In dev, resources live in the repo; in a packaged app they live under
-  // `process.resourcesPath`.
   const base = app.isPackaged
     ? path.join(process.resourcesPath, 'scrubber')
     : path.join(app.getAppPath(), 'resources', 'scrubber');
   return path.join(base, 'identity-scrubber');
 }
 
-export async function runScrubber(
-  pdfPath: string,
-  onStderr?: (chunk: string) => void,
-): Promise<ScrubberResult> {
-  const bin = binaryPath();
-  const args = [pdfPath, '--scrub', '--rapidocr', '--ocr-dpi=600'];
+class ScrubberService extends EventEmitter {
+  private child: ChildProcessWithoutNullStreams | null = null;
+  private stdoutBuf = '';
+  private readyPromise: Promise<void> | null = null;
 
-  return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
+  ensureStarted(): Promise<void> {
+    if (this.readyPromise) return this.readyPromise;
 
-    child.stdout.on('data', (buf: Buffer) => {
-      stdout += buf.toString('utf8');
+    this.readyPromise = new Promise((resolve, reject) => {
+      const bin = binaryPath();
+      console.log('[scrubber] spawning:', bin);
+      let child: ChildProcessWithoutNullStreams;
+      try {
+        child = spawn(bin, ['--serve', '--rapidocr', '--rapidocr-det-model=server', '--ocr-dpi=600'], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch (err) {
+        this.readyPromise = null;
+        reject(err);
+        return;
+      }
+      this.child = child;
+
+      let settled = false;
+      const finish = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        fn();
+      };
+
+      const onReady = (evt: ServeEvent): void => {
+        if (evt.event === 'ready') {
+          this.off('event', onReady);
+          console.log('[scrubber] ready');
+          finish(resolve);
+        }
+      };
+      this.on('event', onReady);
+
+      child.stdout.on('data', (buf: Buffer) => this.consumeStdout(buf.toString('utf8')));
+      child.stderr.on('data', (buf: Buffer) => {
+        const s = buf.toString('utf8');
+        console.log('[scrubber stderr]', s.trimEnd());
+        this.emit('stderr', s);
+      });
+      child.on('error', (err) => {
+        console.error('[scrubber] spawn error:', err);
+        this.readyPromise = null;
+        this.child = null;
+        finish(() => reject(err));
+      });
+      child.on('close', (code) => {
+        console.log('[scrubber] exited with code', code);
+        this.emit('exit', code);
+        this.readyPromise = null;
+        this.child = null;
+        finish(() => reject(new Error(`scrubber exited before ready (code ${code})`)));
+      });
     });
-    child.stderr.on('data', (buf: Buffer) => {
-      const s = buf.toString('utf8');
-      stderr += s;
-      onStderr?.(s);
+
+    return this.readyPromise;
+  }
+
+  private consumeStdout(chunk: string): void {
+    this.stdoutBuf += chunk;
+    let idx: number;
+    while ((idx = this.stdoutBuf.indexOf('\n')) >= 0) {
+      const line = this.stdoutBuf.slice(0, idx).trim();
+      this.stdoutBuf = this.stdoutBuf.slice(idx + 1);
+      if (!line) continue;
+      try {
+        const evt = JSON.parse(line) as ServeEvent;
+        this.emit('event', evt);
+      } catch {
+        this.emit('stderr', `[non-JSON stdout] ${line}\n`);
+      }
+    }
+  }
+
+  private send(req: Record<string, unknown>): void {
+    if (!this.child) throw new Error('scrubber process not started');
+    this.child.stdin.write(JSON.stringify(req) + '\n');
+  }
+
+  async runCommand(
+    req: Record<string, unknown>,
+    onEvent: (evt: ServeEvent) => void,
+  ): Promise<ServeEvent> {
+    await this.ensureStarted();
+    return new Promise((resolve, reject) => {
+      const targetCmd = req.cmd as string;
+      const listener = (evt: ServeEvent): void => {
+        if (evt.cmd && evt.cmd !== targetCmd) return;
+        onEvent(evt);
+        if (evt.event === 'done') {
+          this.off('event', listener);
+          resolve(evt);
+        } else if (evt.event === 'error') {
+          this.off('event', listener);
+          reject(new Error(String(evt.message ?? 'scrubber error')));
+        }
+      };
+      this.on('event', listener);
+      try {
+        this.send(req);
+      } catch (err) {
+        this.off('event', listener);
+        reject(err);
+      }
     });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      resolve({ ok: code === 0, code, stdout, stderr });
-    });
-  });
+  }
+
+  shutdown(): void {
+    if (!this.child) return;
+    try {
+      this.child.stdin.write(JSON.stringify({ cmd: 'close' }) + '\n');
+    } catch {
+      // ignore
+    }
+    this.child.kill();
+    this.child = null;
+    this.readyPromise = null;
+  }
 }
 
-export function defaultTestPdf(): string {
-  // Using /tmp avoids macOS TCC prompts that block Electron from reading
-  // ~/Downloads in dev mode. Copy the source PDF here before running.
-  return '/tmp/scrubber-test.pdf';
-}
+export const scrubberService = new ScrubberService();

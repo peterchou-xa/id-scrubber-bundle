@@ -9,7 +9,7 @@ import {
   USER_OLLAMA_APP,
   ProgressEvent,
 } from './ollama';
-import { runScrubber, defaultTestPdf } from './scrubber';
+import { scrubberService, ServeEvent } from './scrubber';
 
 let mainWindow: BrowserWindow | null = null;
 let installInFlight = false;
@@ -81,18 +81,45 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('scrubber:run', async (_evt, pdfPath?: string) => {
-    const input = pdfPath && pdfPath.length > 0 ? pdfPath : defaultTestPdf();
-    try {
-      const result = await runScrubber(input, (chunk) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('scrubber:log', chunk);
-        }
-      });
-      return { ok: result.ok, code: result.code, stdout: result.stdout, stderr: result.stderr, input };
-    } catch (err) {
-      return { ok: false, error: (err as Error).message, input };
+  const forwardEvent = (evt: ServeEvent): void => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('scrubber:event', evt);
     }
+  };
+
+  scrubberService.on('stderr', (chunk: string) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('scrubber:log', chunk);
+    }
+  });
+
+  ipcMain.handle('scrubber:detect', async (_evt, pdfPath: string) => {
+    try {
+      const result = await scrubberService.runCommand(
+        { cmd: 'detect', path: pdfPath },
+        forwardEvent,
+      );
+      return { ok: true, result };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  ipcMain.handle('scrubber:scrub', async (_evt, selected: string[]) => {
+    try {
+      const result = await scrubberService.runCommand(
+        { cmd: 'scrub', selected },
+        forwardEvent,
+      );
+      return { ok: true, result };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  ipcMain.handle('shell:openPath', async (_evt, filePath: string) => {
+    const err = await shell.openPath(filePath);
+    return { ok: err === '', error: err || undefined };
   });
 
   ipcMain.handle('dialog:openPdf', async () => {
@@ -123,5 +150,10 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  scrubberService.shutdown();
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  scrubberService.shutdown();
 });

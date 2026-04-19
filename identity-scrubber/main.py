@@ -12,6 +12,7 @@ import json
 import re
 import shutil
 import sys
+import traceback
 from collections import defaultdict
 from pathlib import Path
 
@@ -278,12 +279,215 @@ def _run_ocr_scrub(args, input_pdf: str, output_pdf: str) -> bool:
     return True
 
 
+def _emit(obj: dict) -> None:
+    """Write one NDJSON line to stdout and flush immediately."""
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace) -> None:
+    path = req.get("path")
+    if not path:
+        _emit({"event": "error", "cmd": "detect", "message": "missing 'path'"})
+        return
+
+    opts = req.get("options") or {}
+    model = opts.get("model", defaults.model)
+    chunk_size = int(opts.get("chunk_size", defaults.chunk_size))
+    ocr_dpi = int(opts.get("ocr_dpi", defaults.ocr_dpi))
+    use_rapidocr = bool(opts.get("rapidocr", defaults.rapidocr))
+    rapidocr_det_model = opts.get("rapidocr_det_model", defaults.rapidocr_det_model)
+
+    state.clear()
+
+    if use_rapidocr:
+        import rapidocr_scrub as ocr_scrub
+    else:
+        import ocr_scrub
+
+    print(f"[serve] detect: OCR-ing {path} at {ocr_dpi} DPI...", file=sys.stderr)
+    ocr_kwargs = {"dpi": ocr_dpi}
+    if use_rapidocr:
+        ocr_kwargs["det_model"] = rapidocr_det_model
+    try:
+        pages = ocr_scrub.ocr_pdf(path, **ocr_kwargs)
+    except Exception as exc:
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
+        _emit({
+            "event": "error",
+            "cmd": "detect",
+            "message": f"ocr failed: {type(exc).__name__}: {exc!r}",
+            "traceback": tb,
+        })
+        return
+
+    _emit({"event": "progress", "cmd": "detect", "stage": "ocr_done", "pages": len(pages)})
+
+    full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
+    chunks = chunk_text(full_text, chunk_size)
+
+    all_items: list[dict] = []
+    for i, chunk in enumerate(chunks, start=1):
+        try:
+            items = query_ollama(chunk, model)
+        except Exception as exc:
+            tb = traceback.format_exc()
+            print(tb, file=sys.stderr)
+            _emit({
+                "event": "error",
+                "cmd": "detect",
+                "message": f"ollama failed on chunk {i}: {type(exc).__name__}: {exc!r}",
+                "traceback": tb,
+            })
+            return
+        for item in items:
+            _emit({"event": "pii", "cmd": "detect", "item": item})
+        all_items.extend(items)
+        _emit({
+            "event": "progress",
+            "cmd": "detect",
+            "stage": "chunk",
+            "chunk": i,
+            "total": len(chunks),
+        })
+
+    aggregated = aggregate_results(all_items)
+
+    state["pdf_path"] = path
+    state["pages"] = pages
+    state["ocr_dpi"] = ocr_dpi
+    state["ocr_module"] = ocr_scrub
+    state["aggregated"] = aggregated
+
+    _emit({
+        "event": "done",
+        "cmd": "detect",
+        "total_pii": len(aggregated),
+        "pii": aggregated,
+    })
+
+
+def _serve_scrub(req: dict, state: dict) -> None:
+    if "pages" not in state:
+        _emit({
+            "event": "error",
+            "cmd": "scrub",
+            "message": "no document loaded; run detect first",
+        })
+        return
+
+    selected = req.get("selected")
+    if not isinstance(selected, list):
+        _emit({
+            "event": "error",
+            "cmd": "scrub",
+            "message": "missing 'selected' (list of PII values)",
+        })
+        return
+
+    values: set[str] = {v.strip() for v in selected if isinstance(v, str) and v.strip()}
+    if not values:
+        _emit({"event": "error", "cmd": "scrub", "message": "no PII values provided"})
+        return
+
+    input_pdf = state["pdf_path"]
+    output_pdf = _default_scrubbed_path(input_pdf)
+    ocr_scrub = state["ocr_module"]
+    ocr_dpi = state["ocr_dpi"]
+    pages = state["pages"]
+
+    pii_list_sorted = sorted(values)
+    page_bboxes: dict[int, list[tuple[float, float, float, float]]] = {}
+    total_bboxes = 0
+    for page in pages:
+        bboxes = ocr_scrub.find_pii_bboxes(page, pii_list_sorted)
+        if bboxes:
+            page_bboxes[page.page_num] = bboxes
+            total_bboxes += len(bboxes)
+
+    _emit({
+        "event": "progress",
+        "cmd": "scrub",
+        "stage": "matched",
+        "bboxes": total_bboxes,
+        "pages": len(page_bboxes),
+    })
+
+    if not page_bboxes:
+        shutil.copyfile(input_pdf, output_pdf)
+        _emit({
+            "event": "done",
+            "cmd": "scrub",
+            "output": output_pdf,
+            "redacted": False,
+        })
+        return
+
+    try:
+        ocr_scrub.scrub_with_ocr(input_pdf, page_bboxes, output_pdf, dpi=ocr_dpi)
+    except Exception as exc:
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
+        _emit({
+            "event": "error",
+            "cmd": "scrub",
+            "message": f"redaction failed: {type(exc).__name__}: {exc!r}",
+            "traceback": tb,
+        })
+        return
+
+    _emit({
+        "event": "done",
+        "cmd": "scrub",
+        "output": output_pdf,
+        "redacted": True,
+    })
+
+
+def _serve_loop(defaults: argparse.Namespace) -> int:
+    state: dict = {}
+    _emit({"event": "ready"})
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError as exc:
+            _emit({"event": "error", "message": f"invalid JSON: {exc}"})
+            continue
+
+        cmd = req.get("cmd")
+        if cmd == "detect":
+            _serve_detect(req, state, defaults)
+        elif cmd == "scrub":
+            _serve_scrub(req, state)
+        elif cmd == "close":
+            break
+        else:
+            _emit({"event": "error", "message": f"unknown cmd: {cmd!r}"})
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Detect PII in a PDF file using Ollama (gemma3).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("pdf", help="Path to the PDF file to analyze")
+    parser.add_argument(
+        "pdf",
+        nargs="?",
+        help="Path to the PDF file to analyze (omit when using --serve)",
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help=(
+            "Run as a long-lived subprocess speaking NDJSON over stdin/stdout. "
+            "Accepts {\"cmd\":\"detect\",\"path\":...} and {\"cmd\":\"scrub\",\"selected\":[...]} requests."
+        ),
+    )
     parser.add_argument(
         "--model",
         default="gemma3:4b",
@@ -341,6 +545,12 @@ def main():
         ),
     )
     args = parser.parse_args()
+
+    if args.serve:
+        sys.exit(_serve_loop(args))
+
+    if not args.pdf:
+        parser.error("pdf path is required unless --serve is used")
 
     source_pdf = args.pdf
     final_scrubbed_path = _default_scrubbed_path(source_pdf)

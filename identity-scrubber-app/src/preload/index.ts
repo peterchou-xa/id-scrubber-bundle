@@ -37,13 +37,22 @@ export type OllamaApi = typeof ollamaApi;
 
 contextBridge.exposeInMainWorld('ollama', ollamaApi);
 
-export type ScrubberResult =
-  | { ok: true; code: number | null; stdout: string; stderr: string; input: string }
-  | { ok: false; code?: number | null; stdout?: string; stderr?: string; error?: string; input: string };
+export type ServeEvent = Record<string, unknown> & { event: string; cmd?: string };
+
+export type ScrubberCmdResult =
+  | { ok: true; result: ServeEvent }
+  | { ok: false; error: string };
 
 const scrubberApi = {
-  run: (pdfPath?: string): Promise<ScrubberResult> =>
-    ipcRenderer.invoke('scrubber:run', pdfPath),
+  detect: (pdfPath: string): Promise<ScrubberCmdResult> =>
+    ipcRenderer.invoke('scrubber:detect', pdfPath),
+  scrub: (selected: string[]): Promise<ScrubberCmdResult> =>
+    ipcRenderer.invoke('scrubber:scrub', selected),
+  onEvent: (callback: (evt: ServeEvent) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, evt: ServeEvent): void => callback(evt);
+    ipcRenderer.on('scrubber:event', listener);
+    return () => ipcRenderer.removeListener('scrubber:event', listener);
+  },
   onLog: (callback: (chunk: string) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, chunk: string): void => callback(chunk);
     ipcRenderer.on('scrubber:log', listener);
@@ -59,6 +68,8 @@ export type PickedPdf = { path: string; name: string } | null;
 
 const dialogApi = {
   openPdf: (): Promise<PickedPdf> => ipcRenderer.invoke('dialog:openPdf'),
+  openPath: (filePath: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('shell:openPath', filePath),
 };
 
 export type DialogApi = typeof dialogApi;
