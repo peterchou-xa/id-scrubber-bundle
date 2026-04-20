@@ -238,14 +238,18 @@ def find_pii_bboxes(
     target text against the normalized concatenation of each split-line.
 
     Algorithm per PII value:
-      1. Build per-split-line normalized text with a parallel char→word
-         index array. Adjacent split-lines are considered together only
-         if they share a column (x-range overlap) — this prevents matches
-         from straddling unrelated columns on the same y-row.
+      1. Build per-split-line normalized text with parallel arrays mapping
+         each char to its word index *and* its character offset within
+         that word's normalized text. Adjacent split-lines are considered
+         together only if they share a column (x-range overlap) — this
+         prevents matches from straddling unrelated columns on the same
+         y-row.
       2. For each maximal run of column-aligned split-lines, concatenate
          their normalized text and scan for substring occurrences of the
-         target. Map the matched char range back to word indices, then
-         emit one bbox per visual line.
+         target. For each matched word, derive a sub-bbox by linearly
+         interpolating the word's bbox over the matched character range.
+         This is what lets us redact "Peng Li" within a single OCR word
+         "APengLi" without blacking out the leading "A".
     """
     bboxes: list[tuple[float, float, float, float]] = []
     lines = page_ocr.lines or []
@@ -254,19 +258,27 @@ def find_pii_bboxes(
     def _pad(x0: float, y0: float, x1: float, y1: float):
         return (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
 
-    # Precompute per-line normalized text + char→word-index map.
+    # Precompute per-line normalized text + char→(word_idx, offset_in_word) map.
     line_norms: list[str] = []
-    line_char_word: list[list[int]] = []  # char_idx -> index-within-line
+    line_char_word: list[list[int]] = []  # char_idx -> word index within line
+    line_char_offset: list[list[int]] = []  # char_idx -> offset within that word
+    line_word_norm_len: list[list[int]] = []  # word_idx -> normalized length
     line_bboxes: list[tuple[float, float, float, float]] = []
     for line in lines:
         norm_parts = []
         char_word = []
+        char_offset = []
+        word_lens = []
         for word_idx_in_line, w in enumerate(line):
             n = _norm(w.text)
             norm_parts.append(n)
+            word_lens.append(len(n))
             char_word.extend([word_idx_in_line] * len(n))
+            char_offset.extend(range(len(n)))
         line_norms.append("".join(norm_parts))
         line_char_word.append(char_word)
+        line_char_offset.append(char_offset)
+        line_word_norm_len.append(word_lens)
         line_bboxes.append(_line_bbox(line) if line else (0.0, 0.0, 0.0, 0.0))
 
     # Build runs by walking lines top-down and extending a run with any
@@ -295,21 +307,24 @@ def find_pii_bboxes(
             seen_sigs.add(sig)
             runs.append(run)
 
-    def _emit_match_words(matched_words: list[OcrWord]) -> None:
-        if not matched_words:
-            return
-        by_line: list[list[OcrWord]] = []
-        for w in matched_words:
-            placed = False
-            for grp in by_line:
-                if _same_line(grp[0], w):
-                    grp.append(w)
-                    placed = True
-                    break
-            if not placed:
-                by_line.append([w])
-        for grp in by_line:
-            bboxes.append(_pad(*_line_bbox(grp)))
+    def _word_subbbox(line_idx: int, word_idx: int,
+                      min_off: int, max_off_excl: int
+                      ) -> tuple[float, float, float, float]:
+        """Compute the bbox covering chars [min_off, max_off_excl) of a
+        word, derived by linear interpolation over the word's x-range.
+        For a full-word match this is the word bbox; for a partial match
+        (e.g. target "PengLi" inside OCR word "APengLi") this is a
+        sub-region. Linear-interp char width is approximate for
+        proportional fonts but close enough given the 2pt pad and
+        OCR-tight word bboxes."""
+        word = lines[line_idx][word_idx]
+        norm_len = line_word_norm_len[line_idx][word_idx]
+        if norm_len == 0 or (min_off == 0 and max_off_excl == norm_len):
+            return (word.x0, word.y0, word.x1, word.y1)
+        width = word.x1 - word.x0
+        sub_x0 = word.x0 + (min_off / norm_len) * width
+        sub_x1 = word.x0 + (max_off_excl / norm_len) * width
+        return (sub_x0, word.y0, sub_x1, word.y1)
 
     for pii in pii_values:
         target = _norm(pii)
@@ -318,15 +333,17 @@ def find_pii_bboxes(
 
         for run in runs:
             # Concatenate normalized text of this run, tracking for each
-            # char which (line_idx, word_idx_in_line) it came from.
+            # char which (line_idx, word_idx, offset_in_word) it came from.
             run_text_parts: list[str] = []
             run_char_line: list[int] = []
             run_char_word: list[int] = []
+            run_char_offset: list[int] = []
             for line_idx in run:
                 txt = line_norms[line_idx]
                 run_text_parts.append(txt)
                 run_char_line.extend([line_idx] * len(txt))
                 run_char_word.extend(line_char_word[line_idx])
+                run_char_offset.extend(line_char_offset[line_idx])
             run_text = "".join(run_text_parts)
             if not run_text or len(target) > len(run_text):
                 continue
@@ -337,16 +354,34 @@ def find_pii_bboxes(
                 if pos < 0:
                     break
                 end = pos + len(target)
-                # Collect unique (line_idx, word_idx) pairs in the char range.
-                seen: set[tuple[int, int]] = set()
-                matched: list[OcrWord] = []
+                # Group matched chars by (line_idx, word_idx); for each
+                # word, track the min/max offset-within-word touched, so
+                # we can emit a sub-bbox rather than the full word bbox.
+                groups: dict[tuple[int, int], list[int]] = {}
+                order: list[tuple[int, int]] = []
                 for c in range(pos, end):
                     key = (run_char_line[c], run_char_word[c])
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    matched.append(lines[key[0]][key[1]])
-                _emit_match_words(matched)
+                    if key not in groups:
+                        groups[key] = []
+                        order.append(key)
+                    groups[key].append(run_char_offset[c])
+                # Compute per-word sub-bboxes, then union by visual line
+                # so adjacent full-word matches like "1944 FT Medical Road"
+                # collapse into one rectangle (no gaps between words),
+                # while a partial match like "PengLi" inside "APengLi"
+                # stays as a single sub-rectangle inside the word.
+                per_line_subs: dict[int, list[tuple[float, float, float, float]]] = {}
+                for line_idx, word_idx in order:
+                    offsets = groups[(line_idx, word_idx)]
+                    sub = _word_subbbox(line_idx, word_idx,
+                                        min(offsets), max(offsets) + 1)
+                    per_line_subs.setdefault(line_idx, []).append(sub)
+                for subs in per_line_subs.values():
+                    x0 = min(b[0] for b in subs)
+                    y0 = min(b[1] for b in subs)
+                    x1 = max(b[2] for b in subs)
+                    y1 = max(b[3] for b in subs)
+                    bboxes.append(_pad(x0, y0, x1, y1))
                 start = end
 
     return bboxes
