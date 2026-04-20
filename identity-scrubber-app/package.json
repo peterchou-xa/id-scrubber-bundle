@@ -46,6 +46,13 @@
       "out/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "resources/scrubber",
+        "to": "scrubber",
+        "filter": ["**/*"]
+      }
+    ],
     "mac": {
       "category": "public.app-category.productivity",
       "target": [

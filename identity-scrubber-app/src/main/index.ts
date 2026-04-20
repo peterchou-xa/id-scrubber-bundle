@@ -6,6 +6,9 @@ import {
   installOllama,
   startOllama,
   pingOllama,
+  isModelInstalled,
+  ensureModel,
+  MODEL_NAME,
   USER_OLLAMA_APP,
   ProgressEvent,
 } from './ollama';
@@ -61,7 +64,8 @@ app.whenReady().then(() => {
   ipcMain.handle('ollama:status', async () => {
     const detected = await isOllamaInstalled();
     const running = await pingOllama();
-    return { ...detected, running };
+    const modelReady = running ? await isModelInstalled(MODEL_NAME) : false;
+    return { ...detected, running, modelReady, model: MODEL_NAME };
   });
 
   ipcMain.handle('ollama:install', async () => {
@@ -139,6 +143,18 @@ app.whenReady().then(() => {
       return { ok: true, ...res };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  ipcMain.handle('ollama:ensureModel', async () => {
+    try {
+      if (await isModelInstalled(MODEL_NAME)) return { ok: true, alreadyInstalled: true };
+      await ensureModel(MODEL_NAME, emitProgress);
+      return { ok: true, alreadyInstalled: false };
+    } catch (err) {
+      const message = (err as Error).message;
+      emitProgress({ stage: 'error', message });
+      return { ok: false, error: message };
     }
   });
 

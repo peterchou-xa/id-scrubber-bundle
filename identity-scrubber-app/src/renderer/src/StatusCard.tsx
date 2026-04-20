@@ -43,6 +43,8 @@ function StatusText({ state }: { state: SetupState }): JSX.Element {
         return state.step ? INSTALL_STEP_LABELS[state.step] : 'Installing…';
       case 'starting':
         return 'Starting Ollama service…';
+      case 'pulling':
+        return `Downloading AI model${state.model ? ` (${state.model})` : ''}…`;
       case 'done':
         return 'AI engine is ready';
       case 'error':
@@ -71,7 +73,38 @@ function StatusProgress({ state }: { state: SetupState }): JSX.Element | null {
   if (state.stage === 'starting') {
     return <ProgressBar percent={100} label="Almost ready" />;
   }
+  if (state.stage === 'pulling') {
+    const hasBytes = typeof state.total === 'number' && state.total > 0;
+    const label = humanizePullStatus(state.pullStatus);
+    if (hasBytes) {
+      const percent = Math.round((state.percent ?? 0) * 100);
+      const received = formatBytes(state.received);
+      const total = formatBytes(state.total);
+      const byteLabel = `${label} · ${received} / ${total} (${percent}%)`;
+      return <ProgressBar percent={percent} label={byteLabel} />;
+    }
+    return <IndeterminateStatus label={label} />;
+  }
   return null;
+}
+
+function IndeterminateStatus({ label }: { label: string }): JSX.Element {
+  return (
+    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+      <span className="inline-block w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function humanizePullStatus(status?: string): string {
+  if (!status) return 'Preparing…';
+  if (status === 'pulling manifest') return 'Fetching manifest…';
+  if (status.startsWith('pulling ')) return `pulling ${status.slice('pulling '.length)}`;
+  if (status.startsWith('verifying')) return 'Verifying digest…';
+  if (status === 'writing manifest') return 'Finalizing…';
+  if (status === 'success') return 'Done';
+  return status;
 }
 
 function StatusHint({ state }: { state: SetupState }): JSX.Element | null {

@@ -4,6 +4,8 @@ export type OllamaStatus = {
   installed: boolean;
   location: string | null;
   running: boolean;
+  modelReady: boolean;
+  model: string;
 };
 
 export type OllamaInstallResult =
@@ -14,10 +16,22 @@ export type OllamaStartResult =
   | { ok: true; alreadyRunning: boolean }
   | { ok: false; error: string };
 
+export type OllamaEnsureModelResult =
+  | { ok: true; alreadyInstalled: boolean }
+  | { ok: false; error: string };
+
 export type ProgressPayload =
   | { stage: 'downloading'; percent: number; received?: number; total?: number }
   | { stage: 'installing'; step: 'mount' | 'copy' | 'quarantine' }
   | { stage: 'starting'; location?: string }
+  | {
+      stage: 'pulling';
+      model: string;
+      percent: number;
+      received?: number;
+      total?: number;
+      status?: string;
+    }
   | { stage: 'done'; location: string }
   | { stage: 'error'; message: string };
 
@@ -25,6 +39,7 @@ const ollamaApi = {
   getStatus: (): Promise<OllamaStatus> => ipcRenderer.invoke('ollama:status'),
   install: (): Promise<OllamaInstallResult> => ipcRenderer.invoke('ollama:install'),
   start: (): Promise<OllamaStartResult> => ipcRenderer.invoke('ollama:start'),
+  ensureModel: (): Promise<OllamaEnsureModelResult> => ipcRenderer.invoke('ollama:ensureModel'),
   onProgress: (callback: (payload: ProgressPayload) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: ProgressPayload): void =>
       callback(payload);

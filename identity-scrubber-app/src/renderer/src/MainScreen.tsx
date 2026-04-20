@@ -41,6 +41,8 @@ const ICONS = {
   download: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3',
   file: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6',
   x: 'M18 6 6 18 M6 6l12 12',
+  edit: 'M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z',
+  refresh: 'M23 4v6h-6 M1 20v-6h6 M3.51 9a9 9 0 0 1 14.85-3.36L23 10 M20.49 15a9 9 0 0 1-14.85 3.36L1 14',
 };
 
 export function MainScreen(): JSX.Element {
@@ -156,6 +158,8 @@ export function MainScreen(): JSX.Element {
         }}
       />
 
+
+      {/*
       <div className="absolute top-4 right-4 z-50 flex gap-2">
         <button
           onClick={handleReset}
@@ -185,6 +189,7 @@ export function MainScreen(): JSX.Element {
           Scrubbed
         </button>
       </div>
+      */}
 
       <div className="size-full flex flex-col p-8">
         <div className="mb-8 animate-in fade-in slide-in-from-top-4 duration-500">
@@ -207,7 +212,7 @@ export function MainScreen(): JSX.Element {
           <div className="w-72 bg-card border border-border rounded-xl shadow-sm p-4 flex flex-col gap-4">
             <div>
               <label className="text-sm mb-3 block text-primary font-medium">
-                1. Select PDF File
+                {selectedFile ? 'Selected PDF File' : 'Select PDF File'}
               </label>
               {!selectedFile ? (
                 <button
@@ -219,28 +224,36 @@ export function MainScreen(): JSX.Element {
                     className="w-9 h-9 text-muted-foreground group-hover:text-primary transition-colors"
                   />
                   <span className="text-sm text-muted-foreground group-hover:text-foreground transition-colors">
-                    Click to choose PDF
+                    Click to browse
                   </span>
                 </button>
               ) : (
                 <div className="p-3 bg-primary/5 border border-primary/20 rounded-lg flex items-center gap-3">
                   <Icon path={ICONS.file} className="w-6 h-6 text-primary flex-shrink-0" />
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs text-muted-foreground font-medium">Selected file</p>
-                    <p className="text-sm text-primary truncate" title={selectedFile}>
+                    <button
+                      onClick={() => {
+                        if (selectedFilePath) window.dialogApi.openPath(selectedFilePath);
+                      }}
+                      className="text-sm text-primary hover:underline truncate block w-full text-left cursor-pointer"
+                      title={selectedFile}
+                    >
                       {selectedFile}
-                    </p>
+                    </button>
                   </div>
                   <button
                     onClick={handleFileSelect}
-                    className="text-xs text-primary hover:underline font-medium flex-shrink-0"
+                    aria-label="Change file"
+                    title="Change file"
+                    className="p-1.5 rounded-md text-primary hover:bg-primary/10 hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary/40 transition-colors cursor-pointer flex-shrink-0"
                   >
-                    Change
+                    <Icon path={ICONS.edit} className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => setSelectedFile('')}
                     aria-label="Clear file"
-                    className="text-muted-foreground hover:text-foreground flex-shrink-0"
+                    title="Clear file"
+                    className="p-1.5 rounded-md text-primary hover:bg-primary/10 hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary/40 transition-colors cursor-pointer flex-shrink-0"
                   >
                     <Icon path={ICONS.x} className="w-4 h-4" />
                   </button>
@@ -250,7 +263,7 @@ export function MainScreen(): JSX.Element {
 
             {selectedFile && appState === 'empty' && (
               <div>
-                <label className="text-sm mb-3 block text-primary font-medium">2. Detect PII</label>
+                <label className="text-sm mb-3 block text-primary font-medium">Detect PII</label>
                 <button
                   onClick={handleDetect}
                   disabled={isScanning}
@@ -258,7 +271,7 @@ export function MainScreen(): JSX.Element {
                 >
                   <Icon path={ICONS.scan} className="w-4 h-4" />
                   <span className="font-medium">
-                    {isScanning ? 'Scanning...' : 'Analyze Document'}
+                    {isScanning ? 'Scanning...' : 'Run Detection'}
                   </span>
                 </button>
               </div>
@@ -267,7 +280,7 @@ export function MainScreen(): JSX.Element {
             {appState === 'detected' && (
               <div>
                 <label className="text-sm mb-3 block text-primary font-medium">
-                  3. Scrub Document
+                  Scrub Document
                 </label>
                 <button
                   onClick={handleScrub}
@@ -286,13 +299,25 @@ export function MainScreen(): JSX.Element {
             )}
 
             {appState === 'scrubbed' && (
-              <div className="flex-1 flex flex-col items-center justify-center gap-3 bg-primary/5 border border-primary/20 rounded-xl p-5">
-                <Icon path={ICONS.checkCircle} className="w-14 h-14 text-primary" />
-                <div className="text-center">
-                  <h3 className="mb-2 font-semibold text-lg">Scrub Complete</h3>
-                  <p className="text-sm text-muted-foreground mb-4">
-                    All selected PII has been removed
-                  </p>
+              <>
+                <div className="bg-primary/5 border border-primary/20 rounded-xl p-3 flex flex-col gap-3">
+                  <div className="flex flex-col items-center gap-3 pt-2">
+                    <Icon path={ICONS.checkCircle} className="w-14 h-14 text-primary" />
+                    <h3 className="font-semibold text-lg">Scrub Complete</h3>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Icon path={ICONS.file} className="w-6 h-6 text-primary flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <button
+                        onClick={handleOpenScrubbed}
+                        className="text-sm text-primary hover:underline truncate block w-full text-left cursor-pointer"
+                        title={scrubbedPath}
+                      >
+                        {scrubbedPath ? scrubbedPath.split('/').pop() : ''}
+                      </button>
+                    </div>
+                  </div>
+                  {/*
                   <button
                     onClick={handleOpenScrubbed}
                     className="px-4 py-2 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all flex items-center justify-center gap-2 mx-auto"
@@ -300,14 +325,16 @@ export function MainScreen(): JSX.Element {
                     <Icon path={ICONS.download} className="w-4 h-4" />
                     <span className="text-sm font-medium">Open File</span>
                   </button>
-                  <button
-                    onClick={handleReset}
-                    className="mt-3 text-xs text-muted-foreground hover:text-foreground transition-colors underline"
-                  >
-                    Process another document
-                  </button>
+                  */}
                 </div>
-              </div>
+                <button
+                  onClick={handleReset}
+                  className="w-full px-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all flex items-center justify-center gap-2"
+                >
+                  <Icon path={ICONS.refresh} className="w-4 h-4" />
+                  <span className="font-medium">Start Over</span>
+                </button>
+              </>
             )}
 
             <div className="mt-auto pt-4 border-t border-border">
@@ -332,7 +359,7 @@ export function MainScreen(): JSX.Element {
                 <div className="flex items-center gap-2">
                   <div className="w-2 h-2 bg-primary rounded-full animate-pulse" />
                   <span className="text-xs text-muted-foreground font-medium">
-                    {isScanning ? 'Scanning' : 'Complete'}
+                    {isScanning ? 'Scanning' : appState === 'scrubbed' ? 'Scrubbed' : 'Complete'}
                   </span>
                 </div>
               )}
@@ -351,37 +378,66 @@ export function MainScreen(): JSX.Element {
               </div>
             )}
 
-            {(piiItems.length > 0 || isScanning) && appState !== 'scrubbed' && (
+            {(piiItems.length > 0 || isScanning) && (
               <div className="flex-1 flex flex-col min-h-0">
                 <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 pr-1">
-                  {piiItems.map((item, index) => (
-                    <div
-                      key={`${item.type}:${item.value}`}
-                      className="bg-secondary border border-border rounded-lg p-4 hover:border-primary/50 hover:shadow-sm transition-all"
-                    >
-                      <div className="flex items-start gap-4">
-                        <input
-                          type="checkbox"
-                          checked={item.checked}
-                          onChange={() => handleTogglePII(index)}
-                          className="mt-1 w-5 h-5 accent-primary cursor-pointer"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between mb-2">
-                            <div className="flex items-center gap-3">
-                              <span className="text-sm text-primary font-semibold">{formatType(item.type)}</span>
-                              <div className="px-2 py-0.5 bg-primary/10 border border-primary/30 rounded">
-                                <span className="text-xs text-primary font-medium">
-                                  {item.count} occurrence{item.count > 1 ? 's' : ''}
-                                </span>
-                              </div>
+                  {(() => {
+                    const groups = new Map<string, { type: string; entries: { item: PIIItem; index: number }[] }>();
+                    piiItems.forEach((item, index) => {
+                      const g = groups.get(item.type) ?? { type: item.type, entries: [] };
+                      g.entries.push({ item, index });
+                      groups.set(item.type, g);
+                    });
+                    const sortedGroups = Array.from(groups.values())
+                      .map((g) => ({
+                        ...g,
+                        totalCount: g.entries.reduce((sum, e) => sum + e.item.count, 0),
+                        entries: [...g.entries].sort((a, b) => b.item.count - a.item.count),
+                      }))
+                      .sort((a, b) => b.totalCount - a.totalCount);
+                    return sortedGroups.map((group) => {
+                      const totalCount = group.totalCount;
+                      return (
+                        <div
+                          key={group.type}
+                          className="bg-secondary border border-border rounded-lg p-4 hover:border-primary/50 hover:shadow-sm transition-all"
+                        >
+                          <div className="flex items-center justify-between mb-3">
+                            <span className="text-sm text-primary font-semibold">{formatType(group.type)}</span>
+                            <div className="px-2 py-0.5 bg-primary/10 border border-primary/30 rounded flex-shrink-0">
+                              <span className="text-xs text-primary font-medium">
+                                {totalCount} occurrence{totalCount > 1 ? 's' : ''}
+                              </span>
                             </div>
                           </div>
-                          <p className="text-foreground/70 break-words">{item.value}</p>
+                          <div className="flex flex-col gap-2">
+                            {group.entries.map(({ item, index }) => {
+                              const isScrubbed = appState === 'scrubbed' && item.checked;
+                              return (
+                                <div key={`${item.type}:${item.value}`} className="flex items-start gap-3">
+                                  <input
+                                    type="checkbox"
+                                    checked={item.checked}
+                                    onChange={() => handleTogglePII(index)}
+                                    disabled={appState === 'scrubbed'}
+                                    className="mt-0.5 w-5 h-5 accent-primary cursor-pointer disabled:cursor-not-allowed flex-shrink-0"
+                                  />
+                                  <p className={`flex-1 min-w-0 text-foreground/70 break-words ${isScrubbed ? 'line-through opacity-60' : ''}`}>
+                                    {item.value}
+                                  </p>
+                                  {group.entries.length > 1 && (
+                                    <span className="text-xs text-muted-foreground flex-shrink-0 mt-0.5">
+                                      ×{item.count}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
                         </div>
-                      </div>
-                    </div>
-                  ))}
+                      );
+                    });
+                  })()}
 
                   {isScanning && (
                     <div className="bg-secondary/50 border border-border border-dashed rounded-lg p-4 flex items-center gap-3">
@@ -397,37 +453,13 @@ export function MainScreen(): JSX.Element {
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span>Total PII types detected: {piiItems.length}</span>
                     <span>
-                      Selected for removal: {piiItems.filter((i) => i.checked).length}
+                      {appState === 'scrubbed' ? 'Removed' : 'Selected for removal'}: {piiItems.filter((i) => i.checked).length}
                     </span>
                   </div>
                 </div>
               </div>
             )}
 
-            {appState === 'scrubbed' && (
-              <div className="flex-1 flex flex-col">
-                <div className="flex-1 flex flex-col items-center justify-center text-center bg-primary/5 border border-primary/20 rounded-lg p-8">
-                  <div className="w-24 h-24 bg-primary/10 border-2 border-primary rounded-xl flex items-center justify-center mb-6">
-                    <Icon path={ICONS.shield} className="w-12 h-12 text-primary" />
-                  </div>
-                  <h3 className="mb-3 text-primary font-semibold text-lg">Document Sanitized</h3>
-                  <p className="text-muted-foreground max-w-md mb-6">
-                    All selected personally identifiable information has been successfully removed
-                    from the document.
-                  </p>
-                  <div className="bg-secondary border border-border rounded-lg p-4 max-w-md">
-                    <p className="text-xs text-muted-foreground mb-2 font-medium">Output file:</p>
-                    <button
-                      onClick={handleOpenScrubbed}
-                      className="text-sm text-primary hover:underline break-all text-left"
-                      title={scrubbedPath}
-                    >
-                      {scrubbedPath ? scrubbedPath.split('/').pop() : ''}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         </div>
       </div>

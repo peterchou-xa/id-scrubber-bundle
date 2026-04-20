@@ -7,6 +7,7 @@ export type SetupStage =
   | 'downloading'
   | 'installing'
   | 'starting'
+  | 'pulling'
   | 'done'
   | 'error';
 
@@ -18,6 +19,8 @@ export type SetupState = {
   step?: 'mount' | 'copy' | 'quarantine';
   location?: string;
   message?: string;
+  model?: string;
+  pullStatus?: string;
 };
 
 export type OllamaSetup = {
@@ -34,19 +37,27 @@ export function useOllamaSetup(): OllamaSetup {
     setState({ stage: 'checking' });
     try {
       const status = await window.ollama.getStatus();
-      if (status.installed && status.running) {
-        setState({ stage: 'done', location: status.location ?? undefined });
-      } else if (status.installed && !status.running) {
+      if (!status.installed) {
+        setState({ stage: 'idle' });
+        return;
+      }
+      if (!status.running) {
         setState({ stage: 'starting' });
         const res = await window.ollama.start();
-        if (res.ok) {
-          setState({ stage: 'done', location: status.location ?? undefined });
-        } else {
+        if (!res.ok) {
           setState({ stage: 'error', message: res.error });
+          return;
         }
-      } else {
-        setState({ stage: 'idle' });
       }
+      if (!status.modelReady) {
+        setState({ stage: 'pulling', model: status.model, percent: 0 });
+        const res = await window.ollama.ensureModel();
+        if (!res.ok) {
+          setState({ stage: 'error', message: res.error });
+          return;
+        }
+      }
+      setState({ stage: 'done', location: status.location ?? undefined });
     } catch (err) {
       setState({ stage: 'error', message: (err as Error).message });
     }
@@ -82,6 +93,15 @@ export function useOllamaSetup(): OllamaSetup {
             return { stage: 'installing', step: payload.step };
           case 'starting':
             return { stage: 'starting', location: payload.location };
+          case 'pulling':
+            return {
+              stage: 'pulling',
+              model: payload.model,
+              percent: payload.percent,
+              received: payload.received,
+              total: payload.total,
+              pullStatus: payload.status,
+            };
           case 'done':
             return { stage: 'done', location: payload.location };
           case 'error':

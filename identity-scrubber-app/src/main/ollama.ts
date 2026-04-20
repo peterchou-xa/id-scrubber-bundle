@@ -9,6 +9,7 @@ const OLLAMA_DMG_URL = 'https://ollama.com/download/Ollama.dmg';
 const USER_APPS_DIR = path.join(os.homedir(), 'Applications');
 export const USER_OLLAMA_APP = path.join(USER_APPS_DIR, 'Ollama.app');
 const OLLAMA_HOST = 'http://127.0.0.1:11434';
+export const MODEL_NAME = 'gemma3:4b';
 
 export type InstallStatus = {
   installed: boolean;
@@ -19,6 +20,7 @@ export type ProgressEvent =
   | { stage: 'downloading'; percent: number; received?: number; total?: number }
   | { stage: 'installing'; step: 'mount' | 'copy' | 'quarantine' }
   | { stage: 'starting'; location?: string }
+  | { stage: 'pulling'; model: string; percent: number; received?: number; total?: number; status?: string }
   | { stage: 'done'; location: string }
   | { stage: 'error'; message: string };
 
@@ -208,6 +210,111 @@ export async function startOllama(appPath: string): Promise<{ alreadyRunning: bo
   return { alreadyRunning: false };
 }
 
+export function isModelInstalled(model: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = net.request({ url: `${OLLAMA_HOST}/api/tags`, method: 'GET' });
+    let body = '';
+    req.on('response', (res) => {
+      res.on('data', (chunk: Buffer) => {
+        body += chunk.toString('utf8');
+      });
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          resolve(false);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(body) as { models?: { name: string }[] };
+          const names = (parsed.models ?? []).map((m) => m.name);
+          resolve(names.includes(model) || names.some((n) => n.startsWith(`${model.split(':')[0]}:`) && n === model));
+        } catch {
+          resolve(false);
+        }
+      });
+    });
+    req.on('error', () => resolve(false));
+    req.end();
+  });
+}
+
+type PullStatus = {
+  status?: string;
+  total?: number;
+  completed?: number;
+  error?: string;
+};
+
+export function ensureModel(
+  model: string,
+  onProgress?: (evt: ProgressEvent) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const req = net.request({
+      url: `${OLLAMA_HOST}/api/pull`,
+      method: 'POST',
+    });
+    req.setHeader('Content-Type', 'application/json');
+
+    let buf = '';
+    let failed: Error | null = null;
+
+    const handleLine = (line: string): void => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let parsed: PullStatus;
+      try {
+        parsed = JSON.parse(trimmed) as PullStatus;
+      } catch {
+        return;
+      }
+      if (parsed.error) {
+        failed = new Error(parsed.error);
+        return;
+      }
+
+      const status = parsed.status ?? '';
+      const total = parsed.total;
+      const completed = parsed.completed;
+      const hasBytes = typeof total === 'number' && total > 0;
+      const percent = hasBytes && typeof completed === 'number' ? completed / total : undefined;
+
+      onProgress?.({
+        stage: 'pulling',
+        model,
+        percent: percent ?? 0,
+        received: completed,
+        total,
+        status,
+      });
+    };
+
+    req.on('response', (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        reject(new Error(`Model pull failed (HTTP ${res.statusCode})`));
+        return;
+      }
+      res.on('data', (chunk: Buffer) => {
+        buf += chunk.toString('utf8');
+        let idx: number;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          handleLine(line);
+        }
+      });
+      res.on('end', () => {
+        if (buf.trim()) handleLine(buf);
+        if (failed) reject(failed);
+        else resolve();
+      });
+      res.on('error', (err) => reject(err));
+    });
+    req.on('error', (err) => reject(err));
+    req.write(JSON.stringify({ name: model, stream: true }));
+    req.end();
+  });
+}
+
 export type InstallResult = { location: string; reinstalled: boolean };
 
 export async function installOllama(
@@ -222,6 +329,9 @@ export async function installOllama(
   if (existing.installed && existing.location) {
     emit({ stage: 'starting', location: existing.location });
     await startOllama(existing.location);
+    if (!(await isModelInstalled(MODEL_NAME))) {
+      await ensureModel(MODEL_NAME, emit);
+    }
     emit({ stage: 'done', location: existing.location });
     return { location: existing.location, reinstalled: false };
   }
@@ -256,6 +366,10 @@ export async function installOllama(
 
   emit({ stage: 'starting' });
   await startOllama(USER_OLLAMA_APP);
+
+  if (!(await isModelInstalled(MODEL_NAME))) {
+    await ensureModel(MODEL_NAME, emit);
+  }
 
   emit({ stage: 'done', location: USER_OLLAMA_APP });
   return { location: USER_OLLAMA_APP, reinstalled: true };

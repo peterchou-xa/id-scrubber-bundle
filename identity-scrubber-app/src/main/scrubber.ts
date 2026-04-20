@@ -1,7 +1,9 @@
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
+import fs from 'fs';
 import path from 'path';
 import { app } from 'electron';
 import { EventEmitter } from 'events';
+import { MODEL_NAME } from './ollama';
 
 export type ServeEvent = Record<string, unknown> & { event: string; cmd?: string };
 
@@ -24,9 +26,30 @@ class ScrubberService extends EventEmitter {
       const bin = binaryPath();
       console.log('[scrubber] spawning:', bin);
       let child: ChildProcessWithoutNullStreams;
+      const existingNoProxy = process.env.NO_PROXY ?? process.env.no_proxy ?? '';
+      const bypass = ['127.0.0.1', 'localhost', '::1'];
+      const mergedNoProxy = [existingNoProxy, ...bypass].filter(Boolean).join(',');
+
       try {
-        child = spawn(bin, ['--serve', '--rapidocr', '--rapidocr-det-model=server', '--ocr-dpi=600'], {
+        child = spawn(bin, ['--serve', '--rapidocr', `--model=${MODEL_NAME}`, '--ocr-dpi=600'], {
           stdio: ['pipe', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            OLLAMA_HOST: 'http://127.0.0.1:11434',
+            NO_PROXY: mergedNoProxy,
+            no_proxy: mergedNoProxy,
+            PATH: [
+              process.env.PATH ?? '',
+              '/usr/local/bin',
+              '/opt/homebrew/bin',
+              '/usr/bin',
+              '/bin',
+              '/usr/sbin',
+              '/sbin',
+            ]
+              .filter(Boolean)
+              .join(':'),
+          },
         });
       } catch (err) {
         this.readyPromise = null;
@@ -51,10 +74,21 @@ class ScrubberService extends EventEmitter {
       };
       this.on('event', onReady);
 
+      const logPath = path.join(app.getPath('logs'), 'scrubber.log');
+      try {
+        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      } catch {
+        // ignore
+      }
+      const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+      logStream.write(`\n--- scrubber spawn ${new Date().toISOString()} bin=${bin} ---\n`);
+      console.log('[scrubber] log file:', logPath);
+
       child.stdout.on('data', (buf: Buffer) => this.consumeStdout(buf.toString('utf8')));
       child.stderr.on('data', (buf: Buffer) => {
         const s = buf.toString('utf8');
         console.log('[scrubber stderr]', s.trimEnd());
+        logStream.write(s);
         this.emit('stderr', s);
       });
       child.on('error', (err) => {

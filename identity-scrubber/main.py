@@ -9,9 +9,11 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sys
+import time
 import traceback
 from collections import defaultdict
 from pathlib import Path
@@ -96,6 +98,17 @@ def chunk_text(text: str, chunk_size: int) -> list[str]:
     return chunks
 
 
+def _chat_once(model: str, user_message: str):
+    return ollama.chat(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        options={"temperature": 0},
+    )
+
+
 def query_ollama(text_chunk: str, model: str) -> list[dict]:
     """Send a text chunk to Ollama and parse the PII JSON response."""
     user_message = (
@@ -103,33 +116,59 @@ def query_ollama(text_chunk: str, model: str) -> list[dict]:
         + text_chunk
     )
 
-    try:
-        response = ollama.chat(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            options={"temperature": 0},
-        )
-    except ollama.ResponseError as exc:
-        if "not found" in str(exc).lower() or "pull" in str(exc).lower():
-            print(f"Model '{model}' not found locally. Pulling now...")
-            try:
-                ollama.pull(model)
-            except Exception as pull_exc:
-                sys.exit(f"Failed to pull model '{model}': {pull_exc}")
-            # Retry after pull
-            response = ollama.chat(
-                model=model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_message},
-                ],
-                options={"temperature": 0},
+    transient_statuses = {502, 503, 504}
+    max_attempts = 8
+    response = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if attempt == 1:
+                proxy_env = {
+                    k: v
+                    for k, v in os.environ.items()
+                    if "proxy" in k.lower()
+                }
+                print(
+                    f"[ollama chat] attempt=1 host={os.environ.get('OLLAMA_HOST') or '(default)'} "
+                    f"proxy_env={proxy_env}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            response = _chat_once(model, user_message)
+            break
+        except ollama.ResponseError as exc:
+            status = getattr(exc, "status_code", None)
+            err_attr = getattr(exc, "error", None)
+            body = getattr(getattr(exc, "response", None), "text", None)
+            detail = (
+                f"attempt={attempt}/{max_attempts} status={status} error={err_attr!r} "
+                f"body={body!r} repr={exc!r} "
+                f"host={os.environ.get('OLLAMA_HOST') or '(default)'} model={model}"
             )
-        else:
+            print(f"[ollama chat failed] {detail}", file=sys.stderr, flush=True)
+
+            if "not found" in str(exc).lower() or "pull" in str(exc).lower():
+                print(f"Model '{model}' not found locally. Pulling now...")
+                try:
+                    ollama.pull(model)
+                except Exception as pull_exc:
+                    sys.exit(f"Failed to pull model '{model}': {pull_exc}")
+                response = _chat_once(model, user_message)
+                break
+
+            if status in transient_statuses and attempt < max_attempts:
+                wait = min(2 ** (attempt - 1), 10)
+                print(
+                    f"[ollama chat] transient {status}, retrying in {wait}s...",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(wait)
+                continue
+
             raise RuntimeError(f"Ollama error on chunk: {exc}") from exc
+
+    if response is None:
+        raise RuntimeError("Ollama chat returned no response after retries")
 
     raw = response["message"]["content"].strip()
 
