@@ -1,5 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from 'electron';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
 import {
   isOllamaInstalled,
@@ -16,6 +17,16 @@ import { scrubberService, ServeEvent } from './scrubber';
 
 let mainWindow: BrowserWindow | null = null;
 let installInFlight = false;
+
+// Custom scheme so the renderer can <img src="idscrub-img:///abs/path/page-1.png">
+// without tripping over file:// security restrictions. Must be registered as
+// privileged BEFORE app.whenReady().
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'idscrub-img',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+  },
+]);
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -56,6 +67,15 @@ function emitProgress(payload: ProgressEvent): void {
 
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.identityscrubber.app');
+
+  // Bridge idscrub-img:// → on-disk PNG. The python scrubber writes pages to
+  // a system temp dir and emits absolute paths; the renderer constructs URLs
+  // like idscrub-img:///var/folders/.../idscrub-xxx/page-1.png.
+  protocol.handle('idscrub-img', (request) => {
+    const url = new URL(request.url);
+    const filePath = decodeURIComponent(url.pathname);
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window);

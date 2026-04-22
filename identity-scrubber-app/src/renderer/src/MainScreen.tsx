@@ -1,12 +1,34 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 type AppState = 'empty' | 'detected' | 'scrubbed';
+
+interface PiiBBox {
+  page_num: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+interface PageInfo {
+  image_path: string;
+  image_width: number;
+  image_height: number;
+}
 
 interface PIIItem {
   type: string;
   value: string;
   count: number;
   checked: boolean;
+  bboxes: PiiBBox[];
+}
+
+function imgUrl(absPath: string): string {
+  // Fixed dummy host "local" so the URL parser doesn't consume the first
+  // path segment as the authority (which would drop the leading '/var/').
+  // Each segment is URL-encoded for spaces/special chars.
+  return 'idscrub-img://local' + absPath.split('/').map(encodeURIComponent).join('/');
 }
 
 function formatType(t: string): string {
@@ -53,6 +75,8 @@ export function MainScreen(): JSX.Element {
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [piiItems, setPiiItems] = useState<PIIItem[]>([]);
   const [scrubbedPath, setScrubbedPath] = useState<string>('');
+  const [pages, setPages] = useState<Map<number, PageInfo>>(new Map());
+  const [hoveredValue, setHoveredValue] = useState<string | null>(null);
 
   const handleFileSelect = async (): Promise<void> => {
     const picked = await window.dialogApi.openPdf();
@@ -64,8 +88,20 @@ export function MainScreen(): JSX.Element {
 
   useEffect(() => {
     const off = window.scrubber.onEvent((evt) => {
+      console.log('[scrubber event]', evt);
       if (evt.cmd !== 'detect') return;
-      if (evt.event === 'pii') {
+      if (evt.event === 'page') {
+        const pageNum = evt.page_num as number | undefined;
+        const imagePath = evt.image_path as string | undefined;
+        const imgW = evt.image_width as number | undefined;
+        const imgH = evt.image_height as number | undefined;
+        if (!pageNum || !imagePath || !imgW || !imgH) return;
+        setPages((prev) => {
+          const next = new Map(prev);
+          next.set(pageNum, { image_path: imagePath, image_width: imgW, image_height: imgH });
+          return next;
+        });
+      } else if (evt.event === 'pii') {
         const item = evt.item as { type: string; value: string } | undefined;
         if (!item) return;
         setPiiItems((prev) => {
@@ -75,10 +111,16 @@ export function MainScreen(): JSX.Element {
               p === existing ? { ...p, count: p.count + 1 } : p,
             );
           }
-          return [...prev, { type: item.type, value: item.value, count: 1, checked: true }];
+          return [...prev, { type: item.type, value: item.value, count: 1, checked: true, bboxes: [] }];
         });
       } else if (evt.event === 'done') {
-        const pii = (evt.pii as { type: string; value: string; occurrences: number }[]) ?? [];
+        const pii =
+          (evt.pii as {
+            type: string;
+            value: string;
+            occurrences: number;
+            bboxes?: PiiBBox[];
+          }[]) ?? [];
         setPiiItems((prev) =>
           pii.map((p) => {
             const prior = prev.find((x) => x.value === p.value && x.type === p.type);
@@ -87,6 +129,7 @@ export function MainScreen(): JSX.Element {
               value: p.value,
               count: p.occurrences,
               checked: prior?.checked ?? true,
+              bboxes: p.bboxes ?? [],
             };
           }),
         );
@@ -101,6 +144,8 @@ export function MainScreen(): JSX.Element {
     if (!selectedFilePath) return;
     setIsScanning(true);
     setPiiItems([]);
+    setPages(new Map());
+    setHoveredValue(null);
     window.scrubber.detect(selectedFilePath).then((res) => {
       if (!res.ok) {
         console.error('detect error:', res.error);
@@ -145,7 +190,28 @@ export function MainScreen(): JSX.Element {
     setIsScanning(false);
     setIsScrubbing(false);
     setScrubbedPath('');
+    setPages(new Map());
+    setHoveredValue(null);
   };
+
+  // Pick the page to display + bboxes to overlay based on what's hovered.
+  // For now just pick the page of the first bbox of the hovered PII; if
+  // nothing's hovered, fall back to page 1 with no overlays.
+  const previewPanel = useMemo(() => {
+    const hovered = hoveredValue
+      ? piiItems.find((p) => p.value === hoveredValue)
+      : null;
+    const targetBbox = hovered?.bboxes[0];
+    const pageNum = targetBbox?.page_num ?? (pages.size > 0 ? Math.min(...pages.keys()) : null);
+    console.log('[previewPanel] hoveredValue=', hoveredValue, 'hovered=', hovered, 'pages.size=', pages.size, 'pageNum=', pageNum);
+    if (pageNum == null) return null;
+    const page = pages.get(pageNum);
+    if (!page) return null;
+    const overlays = (hovered?.bboxes ?? []).filter((b) => b.page_num === pageNum);
+    const url = imgUrl(page.image_path);
+    console.log('[previewPanel] page=', page, 'overlays=', overlays, 'url=', url);
+    return { page, pageNum, overlays };
+  }, [hoveredValue, piiItems, pages]);
 
   return (
     <div className="size-full bg-background overflow-hidden relative">
@@ -413,8 +479,18 @@ export function MainScreen(): JSX.Element {
                           <div className="flex flex-col gap-2">
                             {group.entries.map(({ item, index }) => {
                               const isScrubbed = appState === 'scrubbed' && item.checked;
+                              const isHovered = hoveredValue === item.value;
                               return (
-                                <div key={`${item.type}:${item.value}`} className="flex items-start gap-3">
+                                <div
+                                  key={`${item.type}:${item.value}`}
+                                  className={`flex items-start gap-3 -mx-1 px-1 py-0.5 rounded ${
+                                    isHovered ? 'bg-primary/10' : ''
+                                  }`}
+                                  onMouseEnter={() => setHoveredValue(item.value)}
+                                  onMouseLeave={() =>
+                                    setHoveredValue((v) => (v === item.value ? null : v))
+                                  }
+                                >
                                   <input
                                     type="checkbox"
                                     checked={item.checked}
@@ -460,6 +536,58 @@ export function MainScreen(): JSX.Element {
               </div>
             )}
 
+          </div>
+
+          {/* Right Panel: PDF preview with bbox overlays (temporary debug view) */}
+          <div className="flex-1 min-h-0 bg-card border border-border rounded-xl shadow-sm p-4 flex flex-col">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="font-semibold text-lg">Preview</h2>
+              {previewPanel && (
+                <span className="text-xs text-muted-foreground">
+                  Page {previewPanel.pageNum} / {pages.size}
+                  {hoveredValue ? ` · ${previewPanel.overlays.length} match(es)` : ''}
+                </span>
+              )}
+            </div>
+            <div className="h-px bg-gradient-to-r from-primary/30 via-primary/10 to-transparent mb-4" />
+
+            <div className="flex-1 min-h-0 overflow-auto">
+              {!previewPanel && (
+                <div className="h-full flex flex-col items-center justify-center text-center text-sm text-muted-foreground">
+                  <Icon path={ICONS.file} className="w-12 h-12 text-muted-foreground/40 mb-3" />
+                  <p>Run detection to preview pages.</p>
+                  <p className="mt-1">Hover a PII entry to highlight its location.</p>
+                </div>
+              )}
+              {previewPanel && (
+                <div
+                  className="relative bg-secondary border border-border rounded mx-auto"
+                  style={{
+                    aspectRatio: `${previewPanel.page.image_width} / ${previewPanel.page.image_height}`,
+                    width: '100%',
+                  }}
+                >
+                  <img
+                    src={imgUrl(previewPanel.page.image_path)}
+                    alt={`Page ${previewPanel.pageNum}`}
+                    className="absolute inset-0 w-full h-full object-contain select-none"
+                    draggable={false}
+                  />
+                  {previewPanel.overlays.map((b, i) => (
+                    <div
+                      key={i}
+                      className="absolute border-2 border-primary bg-primary/20 rounded-sm pointer-events-none"
+                      style={{
+                        left: `${(b.x / previewPanel.page.image_width) * 100}%`,
+                        top: `${(b.y / previewPanel.page.image_height) * 100}%`,
+                        width: `${(b.w / previewPanel.page.image_width) * 100}%`,
+                        height: `${(b.h / previewPanel.page.image_height) * 100}%`,
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>

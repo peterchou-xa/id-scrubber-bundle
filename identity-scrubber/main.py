@@ -13,10 +13,19 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 import traceback
 from collections import defaultdict
 from pathlib import Path
+
+_PROXY_ENV_KEYS = (
+    "http_proxy", "https_proxy", "all_proxy",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+)
+_popped = {k: os.environ.pop(k, None) for k in _PROXY_ENV_KEYS if k in os.environ}
+if _popped:
+    print(f"[startup] popped proxy env: {_popped}", file=sys.stderr, flush=True)
 
 try:
     import ollama
@@ -98,15 +107,55 @@ def chunk_text(text: str, chunk_size: int) -> list[str]:
     return chunks
 
 
+_OLLAMA_CLIENT = None
+
+
+def _get_client():
+    """Build a single ollama.Client that explicitly disables HTTP proxies.
+    Without this the underlying httpx Client picks up http_proxy /
+    https_proxy / ALL_PROXY from the environment and tries to route
+    127.0.0.1:11434 traffic through them, which silently hangs.
+    """
+    global _OLLAMA_CLIENT
+    if _OLLAMA_CLIENT is not None:
+        return _OLLAMA_CLIENT
+
+    host = os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+    print(f"[ollama] building client host={host} (proxy disabled, timeout=120s)", file=sys.stderr, flush=True)
+    # `proxy=None` overrides httpx's env-based proxy detection. trust_env=False
+    # also stops httpx from re-reading HTTP_PROXY / NO_PROXY at request time.
+    try:
+        import httpx
+        transport = httpx.HTTPTransport(proxy=None, retries=0)
+        _OLLAMA_CLIENT = ollama.Client(host=host, timeout=120.0, trust_env=False, transport=transport)
+        print("[ollama] client variant=full (trust_env=False, proxy=None)", file=sys.stderr, flush=True)
+    except TypeError as exc:
+        # Older ollama versions don't accept transport/trust_env kwargs.
+        _OLLAMA_CLIENT = ollama.Client(host=host, timeout=120.0)
+        print(f"[ollama] client variant=fallback (TypeError on full kwargs: {exc!r})", file=sys.stderr, flush=True)
+    return _OLLAMA_CLIENT
+
+
 def _chat_once(model: str, user_message: str):
-    return ollama.chat(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        options={"temperature": 0},
-    )
+    client = _get_client()
+    print(f"[ollama chat] -> POST /api/chat model={model} msg_len={len(user_message)}", file=sys.stderr, flush=True)
+    t0 = time.monotonic()
+    try:
+        response = client.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            options={"temperature": 0},
+        )
+    except Exception as exc:
+        elapsed = time.monotonic() - t0
+        print(f"[ollama chat] <- FAILED after {elapsed:.1f}s: {type(exc).__name__}: {exc!r}", file=sys.stderr, flush=True)
+        raise
+    elapsed = time.monotonic() - t0
+    print(f"[ollama chat] <- OK in {elapsed:.1f}s", file=sys.stderr, flush=True)
+    return response
 
 
 def query_ollama(text_chunk: str, model: str) -> list[dict]:
@@ -281,70 +330,89 @@ def _write_json_output(args, file_path: str, pii_list: list[dict]) -> None:
 
 
 def _run_ocr_scrub(args, input_pdf: str, output_pdf: str) -> bool:
-    """OCR-based scrub flow: render → OCR → LLM → bbox → redact."""
-    if args.rapidocr:
-        import rapidocr_scrub as ocr_scrub
-        backend = "rapidocr"
-    else:
-        import ocr_scrub
-        backend = "tesseract"
+    """OCR-based scrub flow: chains _serve_detect + _serve_scrub with a
+    CLI-flavored event sink."""
+    failed = {"value": False}
+    detect_done: dict = {}
+    scrub_done: dict = {}
 
-    print(f"Rendering and OCR-ing pages at {args.ocr_dpi} DPI using {backend}...", file=sys.stderr)
-    ocr_kwargs = {"dpi": args.ocr_dpi}
-    if args.rapidocr:
-        ocr_kwargs["det_model"] = args.rapidocr_det_model
-    pages = ocr_scrub.ocr_pdf(input_pdf, **ocr_kwargs)
-    print(f"  {len(pages)} page(s), {sum(len(p.words) for p in pages)} word(s) total.", file=sys.stderr)
+    def cli_emit(obj: dict) -> None:
+        event = obj.get("event")
+        cmd = obj.get("cmd")
+        if event == "error":
+            print(f"[{cmd}] ERROR: {obj.get('message')}", file=sys.stderr)
+            failed["value"] = True
+        elif event == "progress":
+            stage = obj.get("stage")
+            if cmd == "detect" and stage == "ocr_done":
+                print(f"OCR complete: {obj['pages']} page(s).", file=sys.stderr)
+            elif cmd == "detect" and stage == "chunk":
+                print(f"  Chunk {obj['chunk']}/{obj['total']} processed.", file=sys.stderr)
+            elif cmd == "scrub" and stage == "matched":
+                print(
+                    f"Matched {obj['bboxes']} PII region(s) across {obj['pages']} page(s).",
+                    file=sys.stderr,
+                )
+        elif event == "done":
+            if cmd == "detect":
+                detect_done.update(obj)
+            elif cmd == "scrub":
+                scrub_done.update(obj)
+        # 'pii' events are silent on the CLI; full list is written via _write_json_output.
 
-    full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
-    ## TODO delete
-    print("ocr full text: ", full_text)
-    print(f"OCR extracted {len(full_text):,} characters.", file=sys.stderr)
-
-    chunks = chunk_text(full_text, args.chunk_size)
-    print(f"Processing {len(chunks)} chunk(s) with model '{args.model}'...", file=sys.stderr)
-
-    all_items: list[dict] = []
-    for i, chunk in enumerate(chunks, start=1):
-        print(f"  Chunk {i}/{len(chunks)}...", file=sys.stderr, end=" ")
-        items = query_ollama(chunk, args.model)
-        print(f"{len(items)} PII item(s) found.", file=sys.stderr)
-        all_items.extend(items)
-
-    all_pii_values: set[str] = {
-        item["value"].strip()
-        for item in all_items
-        if isinstance(item.get("value"), str) and item["value"].strip()
+    detect_req = {
+        "path": input_pdf,
+        "options": {
+            "model": args.model,
+            "chunk_size": args.chunk_size,
+            "ocr_dpi": args.ocr_dpi,
+            "rapidocr_det_model": args.rapidocr_det_model,
+        },
     }
-    all_pii_values.update(parse_custom_pii_values(args.custom_pii))
-    # Don't run filter_pii_values here: in OCR mode each variant needs its
-    # own independent match (e.g., both "51106" and "51106-3639" may appear
-    # on different parts of the page).
-    pii_list_sorted = sorted(all_pii_values)
+    state: dict = {}
+    try:
+        _serve_detect(detect_req, state, args, emit=cli_emit)
+        if failed["value"]:
+            return False
 
-    pii_list = aggregate_results(all_items)
-    _write_json_output(args, input_pdf, pii_list)
+        pii_list = detect_done.get("pii", [])
+        _write_json_output(args, input_pdf, pii_list)
 
-    # Map PII → bboxes per page.
-    page_bboxes: dict[int, list[tuple[float, float, float, float]]] = {}
-    total_bboxes = 0
-    for page in pages:
-        bboxes = ocr_scrub.find_pii_bboxes(page, pii_list_sorted)
-        if bboxes:
-            page_bboxes[page.page_num] = bboxes
-            total_bboxes += len(bboxes)
+        detected_values = {
+            item["value"] for item in state.get("all_items", [])
+            if isinstance(item.get("value"), str) and item["value"].strip()
+        }
+        custom_values = parse_custom_pii_values(args.custom_pii)
+        selected = sorted(detected_values | custom_values)
+        if not selected:
+            print("No PII detected; nothing to redact.", file=sys.stderr)
+            shutil.copyfile(input_pdf, output_pdf)
+            print(f"Scrubbed PDF saved to: {output_pdf}", file=sys.stderr)
+            return False
 
-    print(f"Matched {total_bboxes} PII region(s) across {len(page_bboxes)} page(s).", file=sys.stderr)
-    if not page_bboxes:
-        print("Nothing to redact in OCR pass.", file=sys.stderr)
-        shutil.copyfile(input_pdf, output_pdf)
-        print(f"Scrubbed PDF saved to: {output_pdf}", file=sys.stderr)
-        return False
+        # Custom values weren't in the detect-time bbox map; match them now
+        # so _serve_scrub finds them in the cache.
+        if custom_values:
+            ocr_module = state["ocr_module"]
+            cached = state["bboxes_pdf_by_value"]
+            extras = [v for v in sorted(custom_values) if v not in cached]
+            for v in extras:
+                cached[v] = []
+            for page in state["pages"]:
+                per_value = ocr_module.find_pii_bboxes_by_value(page, extras)
+                for v, pdf_bboxes in per_value.items():
+                    for pdf_bbox in pdf_bboxes:
+                        cached[v].append((page.page_num, pdf_bbox))
 
-    print(f"Redacting PDF (rasterizing at {args.ocr_dpi} DPI)...", file=sys.stderr)
-    ocr_scrub.scrub_with_ocr(input_pdf, page_bboxes, output_pdf, dpi=args.ocr_dpi)
-    print(f"Scrubbed PDF saved to: {output_pdf}", file=sys.stderr)
-    return True
+        print(f"Redacting PDF (rasterizing at {args.ocr_dpi} DPI)...", file=sys.stderr)
+        _serve_scrub({"selected": selected, "output": output_pdf}, state, emit=cli_emit)
+        if failed["value"]:
+            return False
+
+        print(f"Scrubbed PDF saved to: {scrub_done.get('output', output_pdf)}", file=sys.stderr)
+        return bool(scrub_done.get("redacted"))
+    finally:
+        _cleanup_image_dir(state)
 
 
 def _emit(obj: dict) -> None:
@@ -353,44 +421,82 @@ def _emit(obj: dict) -> None:
     sys.stdout.flush()
 
 
-def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace) -> None:
+def _pdf_bbox_to_pixel(
+    pdf_bbox: tuple[float, float, float, float],
+    page_height_pt: float,
+    scale: float,
+) -> dict:
+    """Convert a PDF-point bbox (origin bottom-left) to image-pixel
+    rect (origin top-left, x/y/w/h) suitable for canvas drawing."""
+    x0, y0, x1, y1 = pdf_bbox
+    return {
+        "x": x0 * scale,
+        "y": (page_height_pt - y1) * scale,
+        "w": (x1 - x0) * scale,
+        "h": (y1 - y0) * scale,
+    }
+
+
+def _cleanup_image_dir(state: dict) -> None:
+    """Remove the per-detect temp PNG dir if present."""
+    image_dir = state.pop("image_dir", None)
+    if image_dir and os.path.isdir(image_dir):
+        shutil.rmtree(image_dir, ignore_errors=True)
+
+
+def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_emit) -> None:
     path = req.get("path")
     if not path:
-        _emit({"event": "error", "cmd": "detect", "message": "missing 'path'"})
+        emit({"event": "error", "cmd": "detect", "message": "missing 'path'"})
         return
 
     opts = req.get("options") or {}
     model = opts.get("model", defaults.model)
     chunk_size = int(opts.get("chunk_size", defaults.chunk_size))
     ocr_dpi = int(opts.get("ocr_dpi", defaults.ocr_dpi))
-    use_rapidocr = bool(opts.get("rapidocr", defaults.rapidocr))
     rapidocr_det_model = opts.get("rapidocr_det_model", defaults.rapidocr_det_model)
 
+    _cleanup_image_dir(state)
     state.clear()
 
-    if use_rapidocr:
-        import rapidocr_scrub as ocr_scrub
-    else:
-        import ocr_scrub
+    import rapidocr_scrub as ocr_scrub
 
-    print(f"[serve] detect: OCR-ing {path} at {ocr_dpi} DPI...", file=sys.stderr)
-    ocr_kwargs = {"dpi": ocr_dpi}
-    if use_rapidocr:
-        ocr_kwargs["det_model"] = rapidocr_det_model
+    image_dir = tempfile.mkdtemp(prefix="idscrub-")
+    state["image_dir"] = image_dir
+
+    print(f"[detect] OCR-ing {path} at {ocr_dpi} DPI (images → {image_dir})...", file=sys.stderr)
     try:
-        pages = ocr_scrub.ocr_pdf(path, **ocr_kwargs)
+        pages = ocr_scrub.ocr_pdf(
+            path,
+            dpi=ocr_dpi,
+            det_model=rapidocr_det_model,
+            image_output_dir=image_dir,
+        )
     except Exception as exc:
         tb = traceback.format_exc()
         print(tb, file=sys.stderr)
-        _emit({
+        emit({
             "event": "error",
             "cmd": "detect",
             "message": f"ocr failed: {type(exc).__name__}: {exc!r}",
             "traceback": tb,
         })
+        _cleanup_image_dir(state)
         return
 
-    _emit({"event": "progress", "cmd": "detect", "stage": "ocr_done", "pages": len(pages)})
+    emit({"event": "progress", "cmd": "detect", "stage": "ocr_done", "pages": len(pages)})
+
+    # Tell the client about each rendered page so it can start displaying
+    # them while the LLM chunks through the text.
+    for p in pages:
+        emit({
+            "event": "page",
+            "cmd": "detect",
+            "page_num": p.page_num,
+            "image_path": p.image_path,
+            "image_width": p.image_width,
+            "image_height": p.image_height,
+        })
 
     full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
     chunks = chunk_text(full_text, chunk_size)
@@ -402,7 +508,7 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace) -> None:
         except Exception as exc:
             tb = traceback.format_exc()
             print(tb, file=sys.stderr)
-            _emit({
+            emit({
                 "event": "error",
                 "cmd": "detect",
                 "message": f"ollama failed on chunk {i}: {type(exc).__name__}: {exc!r}",
@@ -410,9 +516,9 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace) -> None:
             })
             return
         for item in items:
-            _emit({"event": "pii", "cmd": "detect", "item": item})
+            emit({"event": "pii", "cmd": "detect", "item": item})
         all_items.extend(items)
-        _emit({
+        emit({
             "event": "progress",
             "cmd": "detect",
             "stage": "chunk",
@@ -422,13 +528,39 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace) -> None:
 
     aggregated = aggregate_results(all_items)
 
+    # Compute per-PII-value bboxes per page (PDF-point coords) once,
+    # cache for _serve_scrub, and convert to pixel coords for the wire.
+    detected_values = sorted({
+        item["value"].strip()
+        for item in all_items
+        if isinstance(item.get("value"), str) and item["value"].strip()
+    })
+
+    bboxes_pdf_by_value: dict[str, list[tuple[int, tuple[float, float, float, float]]]] = {
+        v: [] for v in detected_values
+    }
+    bboxes_px_by_value: dict[str, list[dict]] = {v: [] for v in detected_values}
+    scale = ocr_dpi / 72.0
+    for page in pages:
+        per_value = ocr_scrub.find_pii_bboxes_by_value(page, detected_values)
+        for value, pdf_bboxes in per_value.items():
+            for pdf_bbox in pdf_bboxes:
+                bboxes_pdf_by_value[value].append((page.page_num, pdf_bbox))
+                px = _pdf_bbox_to_pixel(pdf_bbox, page.page_height, scale)
+                bboxes_px_by_value[value].append({"page_num": page.page_num, **px})
+
+    for entry in aggregated:
+        entry["bboxes"] = bboxes_px_by_value.get(entry["value"], [])
+
     state["pdf_path"] = path
     state["pages"] = pages
     state["ocr_dpi"] = ocr_dpi
     state["ocr_module"] = ocr_scrub
     state["aggregated"] = aggregated
+    state["all_items"] = all_items
+    state["bboxes_pdf_by_value"] = bboxes_pdf_by_value
 
-    _emit({
+    emit({
         "event": "done",
         "cmd": "detect",
         "total_pii": len(aggregated),
@@ -436,9 +568,9 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace) -> None:
     })
 
 
-def _serve_scrub(req: dict, state: dict) -> None:
-    if "pages" not in state:
-        _emit({
+def _serve_scrub(req: dict, state: dict, emit=_emit) -> None:
+    if "bboxes_pdf_by_value" not in state:
+        emit({
             "event": "error",
             "cmd": "scrub",
             "message": "no document loaded; run detect first",
@@ -447,34 +579,32 @@ def _serve_scrub(req: dict, state: dict) -> None:
 
     selected = req.get("selected")
     if not isinstance(selected, list):
-        _emit({
+        emit({
             "event": "error",
             "cmd": "scrub",
             "message": "missing 'selected' (list of PII values)",
         })
         return
 
-    values: set[str] = {v.strip() for v in selected if isinstance(v, str) and v.strip()}
+    values = [v.strip() for v in selected if isinstance(v, str) and v.strip()]
     if not values:
-        _emit({"event": "error", "cmd": "scrub", "message": "no PII values provided"})
+        emit({"event": "error", "cmd": "scrub", "message": "no PII values provided"})
         return
 
     input_pdf = state["pdf_path"]
-    output_pdf = _default_scrubbed_path(input_pdf)
+    output_pdf = req.get("output") or _default_scrubbed_path(input_pdf)
     ocr_scrub = state["ocr_module"]
     ocr_dpi = state["ocr_dpi"]
-    pages = state["pages"]
+    cached: dict[str, list[tuple[int, tuple[float, float, float, float]]]] = state["bboxes_pdf_by_value"]
 
-    pii_list_sorted = sorted(values)
     page_bboxes: dict[int, list[tuple[float, float, float, float]]] = {}
     total_bboxes = 0
-    for page in pages:
-        bboxes = ocr_scrub.find_pii_bboxes(page, pii_list_sorted)
-        if bboxes:
-            page_bboxes[page.page_num] = bboxes
-            total_bboxes += len(bboxes)
+    for value in values:
+        for page_num, pdf_bbox in cached.get(value, []):
+            page_bboxes.setdefault(page_num, []).append(pdf_bbox)
+            total_bboxes += 1
 
-    _emit({
+    emit({
         "event": "progress",
         "cmd": "scrub",
         "stage": "matched",
@@ -484,7 +614,7 @@ def _serve_scrub(req: dict, state: dict) -> None:
 
     if not page_bboxes:
         shutil.copyfile(input_pdf, output_pdf)
-        _emit({
+        emit({
             "event": "done",
             "cmd": "scrub",
             "output": output_pdf,
@@ -497,7 +627,7 @@ def _serve_scrub(req: dict, state: dict) -> None:
     except Exception as exc:
         tb = traceback.format_exc()
         print(tb, file=sys.stderr)
-        _emit({
+        emit({
             "event": "error",
             "cmd": "scrub",
             "message": f"redaction failed: {type(exc).__name__}: {exc!r}",
@@ -505,7 +635,7 @@ def _serve_scrub(req: dict, state: dict) -> None:
         })
         return
 
-    _emit({
+    emit({
         "event": "done",
         "cmd": "scrub",
         "output": output_pdf,
@@ -516,25 +646,28 @@ def _serve_scrub(req: dict, state: dict) -> None:
 def _serve_loop(defaults: argparse.Namespace) -> int:
     state: dict = {}
     _emit({"event": "ready"})
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            req = json.loads(line)
-        except json.JSONDecodeError as exc:
-            _emit({"event": "error", "message": f"invalid JSON: {exc}"})
-            continue
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                req = json.loads(line)
+            except json.JSONDecodeError as exc:
+                _emit({"event": "error", "message": f"invalid JSON: {exc}"})
+                continue
 
-        cmd = req.get("cmd")
-        if cmd == "detect":
-            _serve_detect(req, state, defaults)
-        elif cmd == "scrub":
-            _serve_scrub(req, state)
-        elif cmd == "close":
-            break
-        else:
-            _emit({"event": "error", "message": f"unknown cmd: {cmd!r}"})
+            cmd = req.get("cmd")
+            if cmd == "detect":
+                _serve_detect(req, state, defaults)
+            elif cmd == "scrub":
+                _serve_scrub(req, state)
+            elif cmd == "close":
+                break
+            else:
+                _emit({"event": "error", "message": f"unknown cmd: {cmd!r}"})
+    finally:
+        _cleanup_image_dir(state)
     return 0
 
 
@@ -564,7 +697,7 @@ def main():
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=3000,
+        default=2500,
         help="Number of characters per chunk sent to the model",
     )
     parser.add_argument(

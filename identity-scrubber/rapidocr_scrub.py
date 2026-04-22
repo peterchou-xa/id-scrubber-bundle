@@ -75,6 +75,11 @@ class PageOcr:
     # Split-lines in reading order — used by the bbox matcher so it walks
     # the same column-aware sequence the LLM saw in `text`.
     lines: list[list[OcrWord]] = None  # type: ignore
+    # Optional rendered-page artifacts; populated when ocr_pdf is called
+    # with image_output_dir. Pixel space, top-left origin.
+    image_path: str | None = None
+    image_width: int | None = None
+    image_height: int | None = None
 
 
 def _cluster_lines(words: list[OcrWord]) -> list[list[OcrWord]]:
@@ -138,9 +143,19 @@ def _reconstruct_text(lines: list[list[OcrWord]]) -> str:
     return "\n".join(" ".join(w.text for w in line) for line in lines)
 
 
-def ocr_pdf(pdf_path: str, dpi: int = DEFAULT_DPI, det_model: str = "mobile") -> list[PageOcr]:
-    """Render each page and OCR with RapidOCR. Bboxes in PDF user-space points."""
+def ocr_pdf(
+    pdf_path: str,
+    dpi: int = DEFAULT_DPI,
+    det_model: str = "mobile",
+    image_output_dir: str | None = None,
+) -> list[PageOcr]:
+    """Render each page and OCR with RapidOCR. Bboxes in PDF user-space points.
+
+    If image_output_dir is given, each rendered page is saved as
+    page-{N}.png there and the path/dimensions are attached to PageOcr.
+    """
     import numpy as np
+    import os
 
     engine = _get_engine(det_model)
     pdf = pdfium.PdfDocument(pdf_path)
@@ -156,6 +171,11 @@ def ocr_pdf(pdf_path: str, dpi: int = DEFAULT_DPI, det_model: str = "mobile") ->
         page_width_pt = page.get_width()
         page_height_pt = page.get_height()
         img_h = img.height
+
+        image_path = None
+        if image_output_dir is not None:
+            image_path = os.path.join(image_output_dir, f"page-{page_idx + 1}.png")
+            img.save(image_path, "PNG")
 
         result = engine(np.array(img), return_word_box=True)
 
@@ -195,6 +215,9 @@ def ocr_pdf(pdf_path: str, dpi: int = DEFAULT_DPI, det_model: str = "mobile") ->
             page_width=page_width_pt,
             page_height=page_height_pt,
             lines=lines,
+            image_path=image_path,
+            image_width=img.width,
+            image_height=img_h,
         ))
 
     return pages
@@ -231,38 +254,32 @@ def _x_overlaps(a: tuple[float, float, float, float],
     return min(a[2], b[2]) > max(a[0], b[0])
 
 
-def find_pii_bboxes(
+def find_pii_bboxes_by_value(
     page_ocr: PageOcr, pii_values: list[str]
-) -> list[tuple[float, float, float, float]]:
-    """Find bboxes for each PII value by substring-matching normalized
-    target text against the normalized concatenation of each split-line.
+) -> dict[str, list[tuple[float, float, float, float]]]:
+    """Per-PII-value variant of find_pii_bboxes.
 
-    Algorithm per PII value:
-      1. Build per-split-line normalized text with parallel arrays mapping
-         each char to its word index *and* its character offset within
-         that word's normalized text. Adjacent split-lines are considered
-         together only if they share a column (x-range overlap) — this
-         prevents matches from straddling unrelated columns on the same
-         y-row.
-      2. For each maximal run of column-aligned split-lines, concatenate
-         their normalized text and scan for substring occurrences of the
-         target. For each matched word, derive a sub-bbox by linearly
-         interpolating the word's bbox over the matched character range.
-         This is what lets us redact "Peng Li" within a single OCR word
-         "APengLi" without blacking out the leading "A".
+    Returns {pii_value: [(x0, y0, x1, y1), ...]} in PDF user-space points.
+    Every input value gets a key (possibly mapping to []) so callers can
+    distinguish 'not present on this page' from 'never asked about'.
+
+    See find_pii_bboxes for the matching algorithm; the only difference
+    is that matches are bucketed by their originating pii_value instead
+    of being flattened.
     """
-    bboxes: list[tuple[float, float, float, float]] = []
+    by_value: dict[str, list[tuple[float, float, float, float]]] = {
+        pii: [] for pii in pii_values
+    }
     lines = page_ocr.lines or []
     pad = 2.0
 
     def _pad(x0: float, y0: float, x1: float, y1: float):
         return (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
 
-    # Precompute per-line normalized text + char→(word_idx, offset_in_word) map.
     line_norms: list[str] = []
-    line_char_word: list[list[int]] = []  # char_idx -> word index within line
-    line_char_offset: list[list[int]] = []  # char_idx -> offset within that word
-    line_word_norm_len: list[list[int]] = []  # word_idx -> normalized length
+    line_char_word: list[list[int]] = []
+    line_char_offset: list[list[int]] = []
+    line_word_norm_len: list[list[int]] = []
     line_bboxes: list[tuple[float, float, float, float]] = []
     for line in lines:
         norm_parts = []
@@ -281,19 +298,6 @@ def find_pii_bboxes(
         line_word_norm_len.append(word_lens)
         line_bboxes.append(_line_bbox(line) if line else (0.0, 0.0, 0.0, 0.0))
 
-    # Build runs by walking lines top-down and extending a run with any
-    # later line whose x-range overlaps the run's starting line's x-range,
-    # as long as every line in between either also overlaps or can be
-    # skipped. Skipping is what lets a Column A "12d" sit between two
-    # Column B rows without breaking the column B match.
-    #
-    # Concretely: for each line as a potential anchor, emit runs that
-    # extend downward, skipping non-overlapping lines and stopping when
-    # we hit a line that overlaps in x but whose content doesn't match.
-    # To keep the enumeration finite and simple, we instead generate one
-    # run per "anchor" line containing that line plus every subsequent
-    # line whose x-range overlaps the anchor's x-range. This gives us a
-    # focused column view for each starting row.
     runs: list[list[int]] = []
     seen_sigs: set[tuple[int, ...]] = set()
     for anchor in range(len(lines)):
@@ -310,13 +314,6 @@ def find_pii_bboxes(
     def _word_subbbox(line_idx: int, word_idx: int,
                       min_off: int, max_off_excl: int
                       ) -> tuple[float, float, float, float]:
-        """Compute the bbox covering chars [min_off, max_off_excl) of a
-        word, derived by linear interpolation over the word's x-range.
-        For a full-word match this is the word bbox; for a partial match
-        (e.g. target "PengLi" inside OCR word "APengLi") this is a
-        sub-region. Linear-interp char width is approximate for
-        proportional fonts but close enough given the 2pt pad and
-        OCR-tight word bboxes."""
         word = lines[line_idx][word_idx]
         norm_len = line_word_norm_len[line_idx][word_idx]
         if norm_len == 0 or (min_off == 0 and max_off_excl == norm_len):
@@ -330,10 +327,9 @@ def find_pii_bboxes(
         target = _norm(pii)
         if not target:
             continue
+        bboxes = by_value[pii]
 
         for run in runs:
-            # Concatenate normalized text of this run, tracking for each
-            # char which (line_idx, word_idx, offset_in_word) it came from.
             run_text_parts: list[str] = []
             run_char_line: list[int] = []
             run_char_word: list[int] = []
@@ -354,9 +350,6 @@ def find_pii_bboxes(
                 if pos < 0:
                     break
                 end = pos + len(target)
-                # Group matched chars by (line_idx, word_idx); for each
-                # word, track the min/max offset-within-word touched, so
-                # we can emit a sub-bbox rather than the full word bbox.
                 groups: dict[tuple[int, int], list[int]] = {}
                 order: list[tuple[int, int]] = []
                 for c in range(pos, end):
@@ -365,11 +358,6 @@ def find_pii_bboxes(
                         groups[key] = []
                         order.append(key)
                     groups[key].append(run_char_offset[c])
-                # Compute per-word sub-bboxes, then union by visual line
-                # so adjacent full-word matches like "1944 FT Medical Road"
-                # collapse into one rectangle (no gaps between words),
-                # while a partial match like "PengLi" inside "APengLi"
-                # stays as a single sub-rectangle inside the word.
                 per_line_subs: dict[int, list[tuple[float, float, float, float]]] = {}
                 for line_idx, word_idx in order:
                     offsets = groups[(line_idx, word_idx)]
@@ -384,7 +372,18 @@ def find_pii_bboxes(
                     bboxes.append(_pad(x0, y0, x1, y1))
                 start = end
 
-    return bboxes
+    return by_value
+
+
+def find_pii_bboxes(
+    page_ocr: PageOcr, pii_values: list[str]
+) -> list[tuple[float, float, float, float]]:
+    """Flat list of (x0, y0, x1, y1) bboxes in PDF user-space points,
+    aggregated across all matched PII values. See find_pii_bboxes_by_value
+    for the algorithm — this is just a flattening shim around it.
+    """
+    by_value = find_pii_bboxes_by_value(page_ocr, pii_values)
+    return [bbox for bboxes in by_value.values() for bbox in bboxes]
 
 
 # ── Top-level entry ────────────────────────────────────────────────
