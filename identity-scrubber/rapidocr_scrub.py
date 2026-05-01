@@ -328,6 +328,7 @@ def find_pii_bboxes_by_value(
         if not target:
             continue
         bboxes = by_value[pii]
+        seen_bboxes: set[tuple[float, float, float, float]] = set()
 
         for run in runs:
             run_text_parts: list[str] = []
@@ -369,6 +370,10 @@ def find_pii_bboxes_by_value(
                     y0 = min(b[1] for b in subs)
                     x1 = max(b[2] for b in subs)
                     y1 = max(b[3] for b in subs)
+                    key = (round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1))
+                    if key in seen_bboxes:
+                        continue
+                    seen_bboxes.add(key)
                     bboxes.append(_pad(x0, y0, x1, y1))
                 start = end
 

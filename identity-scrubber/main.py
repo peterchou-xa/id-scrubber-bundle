@@ -61,7 +61,7 @@ exactly two fields:
 Example output:
 [{{"type": "full_name", "value": "Jane Doe"}}, {{"type": "email_address", "value": "jane.doe@example.com"}}]
 
-Each "value" must be the minimal atomic span that identifies one PII item.
+Each "value" must be one full PII item.
 Do not include field labels, column headers, or adjacent unrelated tokens
 in the value. US-format examples of the acceptable variety per category:
 - full_name: "Jane Doe", "Dr. Alan T. Turing", "Mary-Jane O'Neill",
@@ -75,7 +75,7 @@ in the value. US-format examples of the acceptable variety per category:
 - phone_number: "(415) 555-0199", "415-555-0199", "415.555.0199",
   "+1-415-555-0199", "4155550199", "1 (415) 555-0199 ext. 1234"
 - home_address: "742 Evergreen Terrace, Springfield, IL 62704",
-  "1234 S Maple St Apt 5, Anytown, NY 10001",
+  "1234 S Maple St Apt 5 Anytown, NY 10001",
   "P.O. Box 1234, Anytown, CA 90210"
 - social_security_number: "123-45-6789", "123456789", "XXX-XX-6789"
 - credit_card_number: "4111 1111 1111 1111", "4111-1111-1111-1111",
@@ -313,6 +313,11 @@ def _default_scrubbed_path(pdf_path: str) -> str:
     return str(path.with_stem(path.stem + "_scrubbed"))
 
 
+def _default_full_text_path(pdf_path: str) -> str:
+    path = Path(pdf_path)
+    return str(path.with_stem(path.stem + "_fulltext").with_suffix(".txt"))
+
+
 def _write_json_output(args, file_path: str, pii_list: list[dict]) -> None:
     output = {
         "file": file_path,
@@ -455,6 +460,7 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
     chunk_size = int(opts.get("chunk_size", defaults.chunk_size))
     ocr_dpi = int(opts.get("ocr_dpi", defaults.ocr_dpi))
     rapidocr_det_model = opts.get("rapidocr_det_model", defaults.rapidocr_det_model)
+    debug_full_text = bool(opts.get("debug_full_text", getattr(defaults, "debug_full_text", False)))
 
     _cleanup_image_dir(state)
     state.clear()
@@ -499,6 +505,16 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
         })
 
     full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
+
+    if debug_full_text:
+        full_text_path = _default_full_text_path(path)
+        try:
+            with open(full_text_path, "w", encoding="utf-8") as f:
+                f.write(full_text)
+            print(f"[detect] full OCR text saved to: {full_text_path}", file=sys.stderr)
+        except OSError as exc:
+            print(f"[detect] failed to write full text: {exc!r}", file=sys.stderr)
+
     chunks = chunk_text(full_text, chunk_size)
 
     all_items: list[dict] = []
@@ -734,6 +750,14 @@ def main():
             "Use RapidOCR (ONNX Runtime) instead of Tesseract. "
             "No native binary dependency; bboxes are estimated per-word "
             "from line-level detections."
+        ),
+    )
+    parser.add_argument(
+        "--debug-full-text",
+        action="store_true",
+        help=(
+            "Save the full OCR'd text to a .txt file alongside the PDF "
+            "(e.g. foo.pdf -> foo_fulltext.txt) for debugging."
         ),
     )
     parser.add_argument(

@@ -3,6 +3,7 @@ bin/
 include/
 lib/
 pyvenv.cfg
+fine-tune/
 
 # Python artifacts
 __pycache__/
