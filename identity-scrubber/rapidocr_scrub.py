@@ -380,6 +380,149 @@ def find_pii_bboxes_by_value(
     return by_value
 
 
+# ── Offset-indexed full text (gliner reverse-mapping) ────────────────
+
+
+@dataclass
+class WordSpan:
+    """A single OCR word's char-offset span inside a reconstructed full_text.
+
+    Used by the gliner code path to reverse-map model-returned entity
+    (start, end) offsets back to specific OCR words on specific pages,
+    instead of string-matching the entity value against the page.
+    """
+    char_start: int
+    char_end: int
+    page_num: int
+    line_idx: int          # global line index across all pages
+    word_idx_in_line: int
+    word: OcrWord
+
+
+def build_indexed_full_text(pages: list[PageOcr]) -> tuple[str, list[WordSpan]]:
+    """Build the same full_text the LLM/gliner sees, but emit a parallel
+    list of WordSpan recording each OCR word's char-offset range inside it.
+
+    Layout (must match _reconstruct_text + main.py join):
+      "[Page {N}]\n" + lines joined by "\n" + "\n\n" between pages,
+      where each line is words joined by " ".
+    """
+    parts: list[str] = []
+    spans: list[WordSpan] = []
+    cursor = 0
+    global_line_idx = 0
+    for page_idx, page in enumerate(pages):
+        if page_idx > 0:
+            parts.append("\n\n")
+            cursor += 2
+        header = f"[Page {page.page_num}]\n"
+        parts.append(header)
+        cursor += len(header)
+        lines = page.lines or []
+        for li, line in enumerate(lines):
+            if li > 0:
+                parts.append("\n")
+                cursor += 1
+            for wi, w in enumerate(line):
+                if wi > 0:
+                    parts.append(" ")
+                    cursor += 1
+                start = cursor
+                parts.append(w.text)
+                cursor += len(w.text)
+                spans.append(WordSpan(
+                    char_start=start,
+                    char_end=cursor,
+                    page_num=page.page_num,
+                    line_idx=global_line_idx + li,
+                    word_idx_in_line=wi,
+                    word=w,
+                ))
+        global_line_idx += len(lines)
+    return "".join(parts), spans
+
+
+def resolve_entities_to_bboxes(
+    word_spans: list[WordSpan],
+    entities: list[dict],
+) -> list[dict]:
+    """Map gliner entities (each with global char offsets) to PDF bboxes.
+
+    Each input entity must have keys: start, end, text, label (offsets are
+    absolute into the full_text built by build_indexed_full_text).
+
+    Returns one result per (entity, line) — multi-line entities (e.g.
+    addresses spanning two visual lines) yield one bbox per line. Within
+    a line, the matched words are merged into a single rectangle.
+    Entities that fall entirely in gaps (page headers, whitespace) are
+    silently dropped — that's the whole point of this path.
+    """
+    import bisect
+
+    starts = [s.char_start for s in word_spans]
+    results: list[dict] = []
+    pad = 2.0
+
+    for ent in entities:
+        g_start = ent.get("start")
+        g_end = ent.get("end")
+        if g_start is None or g_end is None or g_end <= g_start:
+            continue
+
+        idx = bisect.bisect_left(starts, g_start)
+        # The word at idx-1 may still overlap if its char_end > g_start.
+        if idx > 0 and word_spans[idx - 1].char_end > g_start:
+            idx -= 1
+
+        matched: list[tuple[WordSpan, int, int]] = []
+        i = idx
+        while i < len(word_spans) and word_spans[i].char_start < g_end:
+            sp = word_spans[i]
+            ov_start = max(g_start, sp.char_start)
+            ov_end = min(g_end, sp.char_end)
+            if ov_end > ov_start:
+                matched.append((sp, ov_start - sp.char_start, ov_end - sp.char_start))
+            i += 1
+
+        if not matched:
+            continue
+
+        groups: dict[tuple[int, int], list[tuple[WordSpan, int, int]]] = {}
+        order: list[tuple[int, int]] = []
+        for entry in matched:
+            key = (entry[0].page_num, entry[0].line_idx)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(entry)
+
+        for key in order:
+            group = groups[key]
+            sub_bboxes: list[tuple[float, float, float, float]] = []
+            for sp, sub_s, sub_e in group:
+                w = sp.word
+                wlen = len(w.text)
+                if wlen == 0 or (sub_s == 0 and sub_e == wlen):
+                    sub_bboxes.append((w.x0, w.y0, w.x1, w.y1))
+                else:
+                    width = w.x1 - w.x0
+                    sx0 = w.x0 + (sub_s / wlen) * width
+                    sx1 = w.x0 + (sub_e / wlen) * width
+                    sub_bboxes.append((sx0, w.y0, sx1, w.y1))
+            x0 = min(b[0] for b in sub_bboxes) - pad
+            y0 = min(b[1] for b in sub_bboxes) - pad
+            x1 = max(b[2] for b in sub_bboxes) + pad
+            y1 = max(b[3] for b in sub_bboxes) + pad
+            results.append({
+                "value": ent.get("text", ""),
+                "type": (ent.get("label") or "").strip().lower(),
+                "page_num": key[0],
+                "bbox": (x0, y0, x1, y1),
+            })
+
+    return results
+
+
 def find_pii_bboxes(
     page_ocr: PageOcr, pii_values: list[str]
 ) -> list[tuple[float, float, float, float]]:

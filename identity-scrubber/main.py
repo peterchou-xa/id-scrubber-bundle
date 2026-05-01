@@ -294,6 +294,24 @@ def query_gliner(text_chunk: str, threshold: float = 0.3) -> list[dict]:
     return [it for it in items if is_valid_pii_item(it)]
 
 
+def query_gliner_entities(text_chunk: str, threshold: float = 0.3) -> list[dict]:
+    """Run nvidia/gliner-pii and preserve per-entity char offsets.
+
+    Returns raw [{start, end, text, label}, ...] entities so the caller
+    can reverse-map (start, end) onto OCR words instead of re-matching
+    the value as a string (which produces false positives for short
+    values like "WA" hitting "WALMART").
+    """
+    model = _get_gliner_model()
+    t0 = time.monotonic()
+    entities = model.predict_entities(text_chunk, _GLINER_LABELS, threshold=threshold)
+    print(
+        f"[gliner] {len(entities)} entities in {time.monotonic() - t0:.1f}s",
+        file=sys.stderr, flush=True,
+    )
+    return entities
+
+
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -497,6 +515,140 @@ def _cleanup_image_dir(state: dict) -> None:
         shutil.rmtree(image_dir, ignore_errors=True)
 
 
+def _detect_via_gliner_offsets(
+    *,
+    full_text: str,
+    word_spans,
+    chunk_size: int,
+    bboxes_pdf_by_value: dict,
+    bboxes_px_by_value: dict,
+    scale: float,
+    page_height_by_num: dict,
+    emit,
+) -> tuple[list[dict], bool]:
+    """Gliner code path: chunk full_text, but track each chunk's char offset
+    so the entity (start, end) returned by gliner can be reverse-mapped onto
+    the OCR words that actually generated those characters.
+
+    Mutates bboxes_pdf_by_value / bboxes_px_by_value in place. Returns
+    (all_items, failed).
+    """
+    import rapidocr_scrub as ocr_scrub
+
+    overlap = min(200, chunk_size // 10)
+    chunk_offsets: list[int] = []
+    chunk_texts: list[str] = []
+    pos = 0
+    while pos < len(full_text):
+        chunk_offsets.append(pos)
+        chunk_texts.append(full_text[pos:pos + chunk_size])
+        pos += chunk_size - overlap
+    if not chunk_texts:
+        chunk_offsets.append(0)
+        chunk_texts.append("")
+
+    seen_global: set[tuple[int, int, str]] = set()
+    seen_bbox_keys: set[tuple[str, int, int, int, int, int]] = set()
+    all_items: list[dict] = []
+
+    for i, (chunk_offset, chunk) in enumerate(zip(chunk_offsets, chunk_texts), start=1):
+        try:
+            entities = query_gliner_entities(chunk)
+        except Exception as exc:
+            tb = traceback.format_exc()
+            print(tb, file=sys.stderr)
+            emit({
+                "event": "error",
+                "cmd": "detect",
+                "message": f"gliner failed on chunk {i}: {type(exc).__name__}: {exc!r}",
+                "traceback": tb,
+            })
+            return all_items, True
+
+        print(
+            f"[gliner chunk {i}/{len(chunk_texts)}] {len(entities)} raw entities "
+            f"(chunk_offset={chunk_offset})",
+            file=sys.stderr, flush=True,
+        )
+        for ent in entities:
+            print(
+                f"  start={ent.get('start')} end={ent.get('end')} "
+                f"label={ent.get('label')!r} score={ent.get('score')} "
+                f"text={ent.get('text')!r}",
+                file=sys.stderr, flush=True,
+            )
+
+        deduped: list[dict] = []
+        for ent in entities:
+            e_start = ent.get("start")
+            e_end = ent.get("end")
+            if e_start is None or e_end is None:
+                continue
+            label = (ent.get("label") or "").strip().lower()
+            value = (ent.get("text") or "").strip()
+            if not label or not value:
+                continue
+            g_start = chunk_offset + int(e_start)
+            g_end = chunk_offset + int(e_end)
+            key = (g_start, g_end, label)
+            if key in seen_global:
+                continue
+            seen_global.add(key)
+            deduped.append({
+                "start": g_start,
+                "end": g_end,
+                "text": value,
+                "label": label,
+            })
+
+        resolved = ocr_scrub.resolve_entities_to_bboxes(word_spans, deduped)
+
+        resolved_starts = {r["value"]: True for r in resolved}
+        for d in deduped:
+            if d["text"] not in resolved_starts:
+                print(
+                    f"  [drop] no word overlap for "
+                    f"start={d['start']} end={d['end']} "
+                    f"label={d['label']!r} text={d['text']!r}",
+                    file=sys.stderr, flush=True,
+                )
+
+        for r in resolved:
+            item = {"type": r["type"], "value": r["value"]}
+            if not is_valid_pii_item(item):
+                continue
+            page_num = r["page_num"]
+            pdf_bbox = r["bbox"]
+            bbox_key = (
+                r["value"],
+                page_num,
+                round(pdf_bbox[0], 1),
+                round(pdf_bbox[1], 1),
+                round(pdf_bbox[2], 1),
+                round(pdf_bbox[3], 1),
+            )
+            if bbox_key in seen_bbox_keys:
+                continue
+            seen_bbox_keys.add(bbox_key)
+
+            bboxes_pdf_by_value.setdefault(r["value"], []).append((page_num, pdf_bbox))
+            px = _pdf_bbox_to_pixel(pdf_bbox, page_height_by_num[page_num], scale)
+            bboxes_px_by_value.setdefault(r["value"], []).append({"page_num": page_num, **px})
+
+            emit({"event": "pii", "cmd": "detect", "item": item})
+            all_items.append(item)
+
+        emit({
+            "event": "progress",
+            "cmd": "detect",
+            "stage": "chunk",
+            "chunk": i,
+            "total": len(chunk_texts),
+        })
+
+    return all_items, False
+
+
 def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_emit) -> None:
     path = req.get("path")
     if not path:
@@ -552,7 +704,13 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
             "image_height": p.image_height,
         })
 
-    full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
+    use_gliner = model == _GLINER_MODEL_NAME
+
+    if use_gliner:
+        full_text, word_spans = ocr_scrub.build_indexed_full_text(pages)
+    else:
+        full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
+        word_spans = None
 
     if debug_full_text:
         full_text_path = _default_full_text_path(path)
@@ -563,57 +721,68 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
         except OSError as exc:
             print(f"[detect] failed to write full text: {exc!r}", file=sys.stderr)
 
-    chunks = chunk_text(full_text, chunk_size)
+    bboxes_pdf_by_value: dict[str, list[tuple[int, tuple[float, float, float, float]]]] = {}
+    bboxes_px_by_value: dict[str, list[dict]] = {}
+    scale = ocr_dpi / 72.0
+    page_height_by_num = {p.page_num: p.page_height for p in pages}
 
-    use_gliner = model == _GLINER_MODEL_NAME
-    all_items: list[dict] = []
-    for i, chunk in enumerate(chunks, start=1):
-        try:
-            items = query_gliner(chunk) if use_gliner else query_ollama(chunk, model)
-        except Exception as exc:
-            tb = traceback.format_exc()
-            print(tb, file=sys.stderr)
-            backend = "gliner" if use_gliner else "ollama"
-            emit({
-                "event": "error",
-                "cmd": "detect",
-                "message": f"{backend} failed on chunk {i}: {type(exc).__name__}: {exc!r}",
-                "traceback": tb,
-            })
+    if use_gliner:
+        all_items, gliner_failed = _detect_via_gliner_offsets(
+            full_text=full_text,
+            word_spans=word_spans,
+            chunk_size=chunk_size,
+            bboxes_pdf_by_value=bboxes_pdf_by_value,
+            bboxes_px_by_value=bboxes_px_by_value,
+            scale=scale,
+            page_height_by_num=page_height_by_num,
+            emit=emit,
+        )
+        if gliner_failed:
             return
-        for item in items:
-            emit({"event": "pii", "cmd": "detect", "item": item})
-        all_items.extend(items)
-        emit({
-            "event": "progress",
-            "cmd": "detect",
-            "stage": "chunk",
-            "chunk": i,
-            "total": len(chunks),
+    else:
+        chunks = chunk_text(full_text, chunk_size)
+        all_items = []
+        for i, chunk in enumerate(chunks, start=1):
+            try:
+                items = query_ollama(chunk, model)
+            except Exception as exc:
+                tb = traceback.format_exc()
+                print(tb, file=sys.stderr)
+                emit({
+                    "event": "error",
+                    "cmd": "detect",
+                    "message": f"ollama failed on chunk {i}: {type(exc).__name__}: {exc!r}",
+                    "traceback": tb,
+                })
+                return
+            for item in items:
+                emit({"event": "pii", "cmd": "detect", "item": item})
+            all_items.extend(items)
+            emit({
+                "event": "progress",
+                "cmd": "detect",
+                "stage": "chunk",
+                "chunk": i,
+                "total": len(chunks),
+            })
+
+        detected_values = sorted({
+            item["value"].strip()
+            for item in all_items
+            if isinstance(item.get("value"), str) and item["value"].strip()
         })
+        for v in detected_values:
+            bboxes_pdf_by_value.setdefault(v, [])
+            bboxes_px_by_value.setdefault(v, [])
+        for page in pages:
+            per_value = ocr_scrub.find_pii_bboxes_by_value(page, detected_values)
+            for value, pdf_bboxes in per_value.items():
+                for pdf_bbox in pdf_bboxes:
+                    bboxes_pdf_by_value[value].append((page.page_num, pdf_bbox))
+                    px = _pdf_bbox_to_pixel(pdf_bbox, page.page_height, scale)
+                    bboxes_px_by_value[value].append({"page_num": page.page_num, **px})
 
     aggregated = aggregate_results(all_items)
-
-    # Compute per-PII-value bboxes per page (PDF-point coords) once,
-    # cache for _serve_scrub, and convert to pixel coords for the wire.
-    detected_values = sorted({
-        item["value"].strip()
-        for item in all_items
-        if isinstance(item.get("value"), str) and item["value"].strip()
-    })
-
-    bboxes_pdf_by_value: dict[str, list[tuple[int, tuple[float, float, float, float]]]] = {
-        v: [] for v in detected_values
-    }
-    bboxes_px_by_value: dict[str, list[dict]] = {v: [] for v in detected_values}
-    scale = ocr_dpi / 72.0
-    for page in pages:
-        per_value = ocr_scrub.find_pii_bboxes_by_value(page, detected_values)
-        for value, pdf_bboxes in per_value.items():
-            for pdf_bbox in pdf_bboxes:
-                bboxes_pdf_by_value[value].append((page.page_num, pdf_bbox))
-                px = _pdf_bbox_to_pixel(pdf_bbox, page.page_height, scale)
-                bboxes_px_by_value[value].append({"page_num": page.page_num, **px})
 
     for entry in aggregated:
         entry["bboxes"] = bboxes_px_by_value.get(entry["value"], [])
