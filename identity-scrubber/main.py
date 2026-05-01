@@ -244,6 +244,54 @@ def query_ollama(text_chunk: str, model: str) -> list[dict]:
     return [it for it in items if isinstance(it, dict) and is_valid_pii_item(it)]
 
 
+_GLINER_MODEL_NAME = "nvidia/gliner-pii"
+
+# Labels passed to nvidia/gliner-pii at inference time.
+_GLINER_LABELS = [
+    "full_name", "first_name", "last_name",
+    "email", "phone_number",
+    "date_of_birth",
+    "passport_number",
+    "national_id", "ssn",
+    "street_address", "address", "mailing_address",
+    "credit_card", "bank_account_number",
+    "ip_address", "city", "state", "postcode", "po_box"
+]
+
+_GLINER_MODEL = None
+
+
+def _get_gliner_model():
+    global _GLINER_MODEL
+    if _GLINER_MODEL is not None:
+        return _GLINER_MODEL
+    try:
+        from gliner import GLiNER
+    except ImportError:
+        sys.exit("gliner not installed. Run: pip install gliner")
+    print(f"[gliner] loading {_GLINER_MODEL_NAME}...", file=sys.stderr, flush=True)
+    t0 = time.monotonic()
+    _GLINER_MODEL = GLiNER.from_pretrained(_GLINER_MODEL_NAME)
+    print(f"[gliner] model loaded in {time.monotonic() - t0:.1f}s", file=sys.stderr, flush=True)
+    return _GLINER_MODEL
+
+
+def query_gliner(text_chunk: str, threshold: float = 0.3) -> list[dict]:
+    """Run nvidia/gliner-pii on a text chunk and return [{type, value}] items."""
+    model = _get_gliner_model()
+    t0 = time.monotonic()
+    entities = model.predict_entities(text_chunk, _GLINER_LABELS, threshold=threshold)
+    print(
+        f"[gliner] {len(entities)} entities in {time.monotonic() - t0:.1f}s",
+        file=sys.stderr, flush=True,
+    )
+    items = []
+    for ent in entities:
+        raw_label = (ent.get("label") or "").strip().lower()
+        value = (ent.get("text") or "").strip()
+        if value and raw_label:
+            items.append({"type": raw_label, "value": value})
+    return [it for it in items if is_valid_pii_item(it)]
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -517,17 +565,19 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
 
     chunks = chunk_text(full_text, chunk_size)
 
+    use_gliner = model == _GLINER_MODEL_NAME
     all_items: list[dict] = []
     for i, chunk in enumerate(chunks, start=1):
         try:
-            items = query_ollama(chunk, model)
+            items = query_gliner(chunk) if use_gliner else query_ollama(chunk, model)
         except Exception as exc:
             tb = traceback.format_exc()
             print(tb, file=sys.stderr)
+            backend = "gliner" if use_gliner else "ollama"
             emit({
                 "event": "error",
                 "cmd": "detect",
-                "message": f"ollama failed on chunk {i}: {type(exc).__name__}: {exc!r}",
+                "message": f"{backend} failed on chunk {i}: {type(exc).__name__}: {exc!r}",
                 "traceback": tb,
             })
             return
