@@ -57,7 +57,13 @@ def _get_engine(det_model: str = "mobile"):
 
 
 @dataclass
-class OcrWord:
+class OcrSpan:
+    """A single OCR detection: a contiguous text region with its bbox.
+
+    For RapidOCR this is a single word; for PaddleOCR it can be a
+    multi-word segment. Either way, sub-region matching against this
+    span uses uniform-character-width proportional slicing.
+    """
     text: str
     x0: float
     y0: float
@@ -68,13 +74,13 @@ class OcrWord:
 @dataclass
 class PageOcr:
     page_num: int
-    words: list[OcrWord]
+    words: list[OcrSpan]
     text: str
     page_width: float
     page_height: float
     # Split-lines in reading order — used by the bbox matcher so it walks
     # the same column-aware sequence the LLM saw in `text`.
-    lines: list[list[OcrWord]] = None  # type: ignore
+    lines: list[list[OcrSpan]] = None  # type: ignore
     # Optional rendered-page artifacts; populated when ocr_pdf is called
     # with image_output_dir. Pixel space, top-left origin.
     image_path: str | None = None
@@ -82,7 +88,7 @@ class PageOcr:
     image_height: int | None = None
 
 
-def _cluster_lines(words: list[OcrWord]) -> list[list[OcrWord]]:
+def _cluster_lines(words: list[OcrSpan]) -> list[list[OcrSpan]]:
     """Cluster words into visual lines by y-overlap. Each line is sorted
     left→right by x0; lines are ordered top→bottom.
 
@@ -96,7 +102,7 @@ def _cluster_lines(words: list[OcrWord]) -> list[list[OcrWord]]:
         return []
 
     remaining = sorted(words, key=lambda w: -w.y1)
-    lines: list[list[OcrWord]] = []
+    lines: list[list[OcrSpan]] = []
     for w in remaining:
         placed = False
         for line in lines:
@@ -119,14 +125,14 @@ def _cluster_lines(words: list[OcrWord]) -> list[list[OcrWord]]:
     # (common in forms/tables). Split fragments are kept left-to-right
     # within their parent line so column A always precedes column B on
     # that row, regardless of individual token heights.
-    split_lines: list[list[OcrWord]] = []
+    split_lines: list[list[OcrSpan]] = []
     for line in lines:
         if not line:
             continue
         heights = [w.y1 - w.y0 for w in line]
         median_h = sorted(heights)[len(heights) // 2]
         gap_threshold = max(median_h * 2.0, 15.0)
-        current: list[OcrWord] = [line[0]]
+        current: list[OcrSpan] = [line[0]]
         for w in line[1:]:
             prev = current[-1]
             if w.x0 - prev.x1 > gap_threshold:
@@ -139,7 +145,7 @@ def _cluster_lines(words: list[OcrWord]) -> list[list[OcrWord]]:
     return split_lines
 
 
-def _reconstruct_text(lines: list[list[OcrWord]]) -> str:
+def _reconstruct_text(lines: list[list[OcrSpan]]) -> str:
     return "\n".join(" ".join(w.text for w in line) for line in lines)
 
 
@@ -179,7 +185,7 @@ def ocr_pdf(
 
         result = engine(np.array(img), return_word_box=True)
 
-        words: list[OcrWord] = []
+        words: list[OcrSpan] = []
 
         if result is not None and result.word_results:
             for line_words in result.word_results:
@@ -203,7 +209,7 @@ def ocr_pdf(
                     y1 = (img_h - py0) / scale
                     y0 = (img_h - py1) / scale
 
-                    words.append(OcrWord(text=tok, x0=x0, y0=y0, x1=x1, y1=y1))
+                    words.append(OcrSpan(text=tok, x0=x0, y0=y0, x1=x1, y1=y1))
 
         lines = _cluster_lines(words)
         ordered_words = [w for line in lines for w in line]
@@ -230,13 +236,13 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
-def _same_line(a: OcrWord, b: OcrWord) -> bool:
+def _same_line(a: OcrSpan, b: OcrSpan) -> bool:
     overlap = max(0.0, min(a.y1, b.y1) - max(a.y0, b.y0))
     shorter = min(a.y1 - a.y0, b.y1 - b.y0)
     return shorter > 0 and overlap / shorter > 0.5
 
 
-def _line_bbox(line: list[OcrWord]) -> tuple[float, float, float, float]:
+def _line_bbox(line: list[OcrSpan]) -> tuple[float, float, float, float]:
     return (
         min(w.x0 for w in line),
         min(w.y0 for w in line),
@@ -384,31 +390,33 @@ def find_pii_bboxes_by_value(
 
 
 @dataclass
-class WordSpan:
-    """A single OCR word's char-offset span inside a reconstructed full_text.
+class IndexedSpan:
+    """An OcrSpan's char-offset range inside a reconstructed full_text.
 
     Used by the gliner code path to reverse-map model-returned entity
-    (start, end) offsets back to specific OCR words on specific pages,
+    (start, end) offsets back to specific OCR spans on specific pages,
     instead of string-matching the entity value against the page.
+    Partial overlap (entity covers only part of a multi-word segment)
+    is handled by proportional bbox slicing in resolve_entities_to_bboxes.
     """
     char_start: int
     char_end: int
     page_num: int
     line_idx: int          # global line index across all pages
     word_idx_in_line: int
-    word: OcrWord
+    word: OcrSpan
 
 
-def build_indexed_full_text(pages: list[PageOcr]) -> tuple[str, list[WordSpan]]:
+def build_indexed_full_text(pages: list[PageOcr]) -> tuple[str, list[IndexedSpan]]:
     """Build the same full_text the LLM/gliner sees, but emit a parallel
-    list of WordSpan recording each OCR word's char-offset range inside it.
+    list of IndexedSpan recording each OCR word's char-offset range inside it.
 
     Layout (must match _reconstruct_text + main.py join):
       "[Page {N}]\n" + lines joined by "\n" + "\n\n" between pages,
       where each line is words joined by " ".
     """
     parts: list[str] = []
-    spans: list[WordSpan] = []
+    spans: list[IndexedSpan] = []
     cursor = 0
     global_line_idx = 0
     for page_idx, page in enumerate(pages):
@@ -430,7 +438,7 @@ def build_indexed_full_text(pages: list[PageOcr]) -> tuple[str, list[WordSpan]]:
                 start = cursor
                 parts.append(w.text)
                 cursor += len(w.text)
-                spans.append(WordSpan(
+                spans.append(IndexedSpan(
                     char_start=start,
                     char_end=cursor,
                     page_num=page.page_num,
@@ -443,7 +451,7 @@ def build_indexed_full_text(pages: list[PageOcr]) -> tuple[str, list[WordSpan]]:
 
 
 def resolve_entities_to_bboxes(
-    word_spans: list[WordSpan],
+    word_spans: list[IndexedSpan],
     entities: list[dict],
 ) -> list[dict]:
     """Map gliner entities (each with global char offsets) to PDF bboxes.
@@ -474,7 +482,7 @@ def resolve_entities_to_bboxes(
         if idx > 0 and word_spans[idx - 1].char_end > g_start:
             idx -= 1
 
-        matched: list[tuple[WordSpan, int, int]] = []
+        matched: list[tuple[IndexedSpan, int, int]] = []
         i = idx
         while i < len(word_spans) and word_spans[i].char_start < g_end:
             sp = word_spans[i]
@@ -487,7 +495,7 @@ def resolve_entities_to_bboxes(
         if not matched:
             continue
 
-        groups: dict[tuple[int, int], list[tuple[WordSpan, int, int]]] = {}
+        groups: dict[tuple[int, int], list[tuple[IndexedSpan, int, int]]] = {}
         order: list[tuple[int, int]] = []
         for entry in matched:
             key = (entry[0].page_num, entry[0].line_idx)

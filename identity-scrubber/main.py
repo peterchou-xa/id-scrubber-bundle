@@ -276,7 +276,7 @@ def _get_gliner_model():
     return _GLINER_MODEL
 
 
-def query_gliner(text_chunk: str, threshold: float = 0.3) -> list[dict]:
+def query_gliner(text_chunk: str, threshold: float = 0.5) -> list[dict]:
     """Run nvidia/gliner-pii on a text chunk and return [{type, value}] items."""
     model = _get_gliner_model()
     t0 = time.monotonic()
@@ -438,6 +438,7 @@ def _run_ocr_scrub(args, input_pdf: str, output_pdf: str) -> bool:
             "chunk_size": args.chunk_size,
             "ocr_dpi": args.ocr_dpi,
             "rapidocr_det_model": args.rapidocr_det_model,
+            "paddleocr": args.paddleocr,
         },
     }
     state: dict = {}
@@ -515,8 +516,25 @@ def _cleanup_image_dir(state: dict) -> None:
         shutil.rmtree(image_dir, ignore_errors=True)
 
 
+def _get_ocr_module(opts_or_args):
+    """Pick the OCR backend module based on the --paddleocr flag.
+
+    Accepts either an argparse.Namespace (CLI defaults) or a request opts
+    dict (per-call override from the serve loop)."""
+    if isinstance(opts_or_args, dict):
+        use_paddle = bool(opts_or_args.get("paddleocr", False))
+    else:
+        use_paddle = bool(getattr(opts_or_args, "paddleocr", False))
+    if use_paddle:
+        import paddleocr_scrub as ocr_scrub
+    else:
+        import rapidocr_scrub as ocr_scrub
+    return ocr_scrub
+
+
 def _detect_via_gliner_offsets(
     *,
+    ocr_scrub,
     full_text: str,
     word_spans,
     chunk_size: int,
@@ -533,8 +551,6 @@ def _detect_via_gliner_offsets(
     Mutates bboxes_pdf_by_value / bboxes_px_by_value in place. Returns
     (all_items, failed).
     """
-    import rapidocr_scrub as ocr_scrub
-
     overlap = min(200, chunk_size // 10)
     chunk_offsets: list[int] = []
     chunk_texts: list[str] = []
@@ -665,7 +681,7 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
     _cleanup_image_dir(state)
     state.clear()
 
-    import rapidocr_scrub as ocr_scrub
+    ocr_scrub = _get_ocr_module(opts if "paddleocr" in opts else defaults)
 
     image_dir = tempfile.mkdtemp(prefix="idscrub-")
     state["image_dir"] = image_dir
@@ -728,6 +744,7 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
 
     if use_gliner:
         all_items, gliner_failed = _detect_via_gliner_offsets(
+            ocr_scrub=ocr_scrub,
             full_text=full_text,
             word_spans=word_spans,
             chunk_size=chunk_size,
@@ -969,6 +986,14 @@ def main():
             "Use RapidOCR (ONNX Runtime) instead of Tesseract. "
             "No native binary dependency; bboxes are estimated per-word "
             "from line-level detections."
+        ),
+    )
+    parser.add_argument(
+        "--paddleocr",
+        action="store_true",
+        help=(
+            "Use PaddleOCR instead of RapidOCR. Per-word bboxes are "
+            "approximated by slicing line polygons proportionally."
         ),
     )
     parser.add_argument(
