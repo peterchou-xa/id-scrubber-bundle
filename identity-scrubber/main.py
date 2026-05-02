@@ -400,9 +400,9 @@ def _write_json_output(args, file_path: str, pii_list: list[dict]) -> None:
         print(json_output)
 
 
-def _run_ocr_scrub(args, input_pdf: str, output_pdf: str) -> bool:
-    """OCR-based scrub flow: chains _serve_detect + _serve_scrub with a
-    CLI-flavored event sink."""
+def _run_ocr_scrub(args, input_pdf: str, output_pdf: str, *, do_scrub: bool) -> bool:
+    """OCR-based detect flow; optionally redacts. With do_scrub=False
+    the PII JSON is still written but the PDF is left untouched."""
     failed = {"value": False}
     detect_done: dict = {}
     scrub_done: dict = {}
@@ -437,8 +437,6 @@ def _run_ocr_scrub(args, input_pdf: str, output_pdf: str) -> bool:
             "model": args.model,
             "chunk_size": args.chunk_size,
             "ocr_dpi": args.ocr_dpi,
-            "rapidocr_det_model": args.rapidocr_det_model,
-            "paddleocr": args.paddleocr,
         },
     }
     state: dict = {}
@@ -449,6 +447,9 @@ def _run_ocr_scrub(args, input_pdf: str, output_pdf: str) -> bool:
 
         pii_list = detect_done.get("pii", [])
         _write_json_output(args, input_pdf, pii_list)
+
+        if not do_scrub:
+            return False
 
         detected_values = {
             item["value"] for item in state.get("all_items", [])
@@ -514,22 +515,6 @@ def _cleanup_image_dir(state: dict) -> None:
     image_dir = state.pop("image_dir", None)
     if image_dir and os.path.isdir(image_dir):
         shutil.rmtree(image_dir, ignore_errors=True)
-
-
-def _get_ocr_module(opts_or_args):
-    """Pick the OCR backend module based on the --paddleocr flag.
-
-    Accepts either an argparse.Namespace (CLI defaults) or a request opts
-    dict (per-call override from the serve loop)."""
-    if isinstance(opts_or_args, dict):
-        use_paddle = bool(opts_or_args.get("paddleocr", False))
-    else:
-        use_paddle = bool(getattr(opts_or_args, "paddleocr", False))
-    if use_paddle:
-        import paddleocr_scrub as ocr_scrub
-    else:
-        import rapidocr_scrub as ocr_scrub
-    return ocr_scrub
 
 
 def _detect_via_gliner_offsets(
@@ -675,13 +660,12 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
     model = opts.get("model", defaults.model)
     chunk_size = int(opts.get("chunk_size", defaults.chunk_size))
     ocr_dpi = int(opts.get("ocr_dpi", defaults.ocr_dpi))
-    rapidocr_det_model = opts.get("rapidocr_det_model", defaults.rapidocr_det_model)
     debug_full_text = bool(opts.get("debug_full_text", getattr(defaults, "debug_full_text", False)))
 
     _cleanup_image_dir(state)
     state.clear()
 
-    ocr_scrub = _get_ocr_module(opts if "paddleocr" in opts else defaults)
+    import paddleocr_scrub as ocr_scrub
 
     image_dir = tempfile.mkdtemp(prefix="idscrub-")
     state["image_dir"] = image_dir
@@ -691,7 +675,6 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
         pages = ocr_scrub.ocr_pdf(
             path,
             dpi=ocr_dpi,
-            det_model=rapidocr_det_model,
             image_output_dir=image_dir,
         )
     except Exception as exc:
@@ -980,37 +963,11 @@ def main():
         help="DPI used when rendering pages for OCR.",
     )
     parser.add_argument(
-        "--rapidocr",
-        action="store_true",
-        help=(
-            "Use RapidOCR (ONNX Runtime) instead of Tesseract. "
-            "No native binary dependency; bboxes are estimated per-word "
-            "from line-level detections."
-        ),
-    )
-    parser.add_argument(
-        "--paddleocr",
-        action="store_true",
-        help=(
-            "Use PaddleOCR instead of RapidOCR. Per-word bboxes are "
-            "approximated by slicing line polygons proportionally."
-        ),
-    )
-    parser.add_argument(
         "--debug-full-text",
         action="store_true",
         help=(
             "Save the full OCR'd text to a .txt file alongside the PDF "
             "(e.g. foo.pdf -> foo_fulltext.txt) for debugging."
-        ),
-    )
-    parser.add_argument(
-        "--rapidocr-det-model",
-        choices=("mobile", "server"),
-        default="mobile",
-        help=(
-            "RapidOCR text detector variant. 'server' has higher recall on "
-            "thin/small text at ~3x the latency."
         ),
     )
     args = parser.parse_args()
@@ -1024,8 +981,7 @@ def main():
     source_pdf = args.pdf
     final_scrubbed_path = _default_scrubbed_path(source_pdf)
 
-    if args.scrub:
-        _run_ocr_scrub(args, source_pdf, final_scrubbed_path)
+    _run_ocr_scrub(args, source_pdf, final_scrubbed_path, do_scrub=args.scrub)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 """
 paddleocr_scrub.py — OCR-driven PDF redaction using PaddleOCR.
 
-Public surface mirrors rapidocr_scrub.py:
-  - ocr_pdf(pdf_path, dpi, det_model, image_output_dir) -> list[PageOcr]
+Public surface:
+  - ocr_pdf(pdf_path, dpi, image_output_dir) -> list[PageOcr]
   - find_pii_bboxes_by_value(page_ocr, pii_values) -> dict[str, list[bbox]]
   - find_pii_bboxes(page_ocr, pii_values) -> list[bbox]
   - build_indexed_full_text(pages) -> (str, list[IndexedSpan])
@@ -19,22 +19,11 @@ character-width slicing needed for whole-word PII values.
 from __future__ import annotations
 
 import os
-
-from rapidocr_scrub import (
-    IndexedSpan,
-    OcrSpan,
-    PageOcr,
-    _cluster_lines,
-    _reconstruct_text,
-    build_indexed_full_text,
-    find_pii_bboxes,
-    find_pii_bboxes_by_value,
-    render_redacted_pages,
-    resolve_entities_to_bboxes,
-    scrub_with_ocr,
-)
+import re
+from dataclasses import dataclass
 
 import pypdfium2 as pdfium
+from PIL import ImageDraw
 
 
 DEFAULT_DPI = 300
@@ -61,18 +50,105 @@ def _get_engine():
         use_doc_unwarping=False,
         use_textline_orientation=False,
         text_detection_model_name="PP-OCRv5_mobile_det",
-        # Loosen the detector polygon so line-level boxes — and the
-        # recognizer-derived word boxes inside them — aren't shrink-wrapped
-        # against the leading/trailing glyph edges. RapidOCR uses 2.0 here.
-        text_det_unclip_ratio=2.0,
+        text_det_unclip_ratio=1.5,
     )
     return _ENGINE
+
+
+# ── Data model ──────────────────────────────────────────────────────
+
+
+@dataclass
+class OcrSpan:
+    """A single OCR detection: a contiguous text region with its bbox."""
+    text: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+@dataclass
+class PageOcr:
+    page_num: int
+    words: list[OcrSpan]
+    text: str
+    page_width: float
+    page_height: float
+    # Split-lines in reading order — used by the bbox matcher so it walks
+    # the same column-aware sequence the LLM saw in `text`.
+    lines: list[list[OcrSpan]] = None  # type: ignore
+    # Optional rendered-page artifacts; populated when ocr_pdf is called
+    # with image_output_dir. Pixel space, top-left origin.
+    image_path: str | None = None
+    image_width: int | None = None
+    image_height: int | None = None
+
+
+def _cluster_lines(words: list[OcrSpan]) -> list[list[OcrSpan]]:
+    """Cluster words into visual lines by y-overlap. Each line is sorted
+    left→right by x0; lines are ordered top→bottom.
+
+    This is the single source of truth for reading order. Both text
+    reconstruction (LLM input) and PII bbox matching (redaction) consume
+    the same ordering, so the LLM and the matcher see tokens in the same
+    sequence.
+    """
+    if not words:
+        return []
+
+    remaining = sorted(words, key=lambda w: -w.y1)
+    lines: list[list[OcrSpan]] = []
+    for w in remaining:
+        placed = False
+        for line in lines:
+            rep = line[0]
+            overlap = max(0.0, min(w.y1, rep.y1) - max(w.y0, rep.y0))
+            shorter = min(w.y1 - w.y0, rep.y1 - rep.y0)
+            if shorter > 0 and overlap / shorter > 0.5:
+                line.append(w)
+                placed = True
+                break
+        if not placed:
+            lines.append([w])
+
+    lines.sort(key=lambda ln: -max(w.y1 for w in ln))
+    for line in lines:
+        line.sort(key=lambda w: w.x0)
+
+    # Split each y-line on large horizontal gaps. Two words on the same
+    # y-row but separated by a wide blank run are in different columns
+    # (common in forms/tables).
+    split_lines: list[list[OcrSpan]] = []
+    for line in lines:
+        if not line:
+            continue
+        heights = [w.y1 - w.y0 for w in line]
+        median_h = sorted(heights)[len(heights) // 2]
+        gap_threshold = max(median_h * 2.0, 15.0)
+        current: list[OcrSpan] = [line[0]]
+        for w in line[1:]:
+            prev = current[-1]
+            if w.x0 - prev.x1 > gap_threshold:
+                split_lines.append(current)
+                current = [w]
+            else:
+                current.append(w)
+        split_lines.append(current)
+
+    return split_lines
+
+
+def _reconstruct_text(lines: list[list[OcrSpan]]) -> str:
+    return "\n".join(" ".join(w.text for w in line) for line in lines)
+
+
+# ── OCR ─────────────────────────────────────────────────────────────
 
 
 def ocr_pdf(
     pdf_path: str,
     dpi: int = DEFAULT_DPI,
-    det_model: str = "mobile",  # accepted for API parity; ignored
     image_output_dir: str | None = None,
 ) -> list[PageOcr]:
     """Render each page and OCR with PaddleOCR. Bboxes in PDF user-space points."""
@@ -105,7 +181,6 @@ def ocr_pdf(
         # PaddleOCR 3.x .predict(return_word_box=True) returns a list of
         # OCRResult objects with text_word / text_word_region: per-line
         # lists of word strings and their tight quadrilateral polygons.
-        # Whitespace tokens get their own entries; we skip those.
         for res in results or []:
             text_words = res.get("text_word") or []
             text_word_regions = res.get("text_word_region") or []
@@ -129,9 +204,8 @@ def ocr_pdf(
 
                     # Recognizer-derived word polygons are tight against
                     # glyph edges and routinely shave a few pixels off the
-                    # leading/trailing characters. Expand horizontally by
-                    # ~20% of the box height so redactions reliably cover
-                    # the visible glyphs at any DPI.
+                    # leading/trailing characters. Expand horizontally so
+                    # redactions reliably cover the visible glyphs.
                     expand = max(4.0, (py1 - py0) * 0.20)
                     px0 -= expand
                     px1 += expand
@@ -159,6 +233,354 @@ def ocr_pdf(
         ))
 
     return pages
+
+
+# ── String-match PII → bbox (ollama / custom-pii path) ───────────────
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _line_bbox(line: list[OcrSpan]) -> tuple[float, float, float, float]:
+    return (
+        min(w.x0 for w in line),
+        min(w.y0 for w in line),
+        max(w.x1 for w in line),
+        max(w.y1 for w in line),
+    )
+
+
+def _x_overlaps(a: tuple[float, float, float, float],
+                b: tuple[float, float, float, float]) -> bool:
+    """Multi-line PII only extends into the next split-line if it shares
+    a column with the current one — keeps form-label columns from
+    interleaving with data columns when they share y-rows."""
+    return min(a[2], b[2]) > max(a[0], b[0])
+
+
+def find_pii_bboxes_by_value(
+    page_ocr: PageOcr, pii_values: list[str]
+) -> dict[str, list[tuple[float, float, float, float]]]:
+    """{pii_value: [(x0, y0, x1, y1), ...]} in PDF user-space points.
+
+    Every input value gets a key (possibly mapping to []) so callers can
+    distinguish 'not present on this page' from 'never asked about'.
+    """
+    by_value: dict[str, list[tuple[float, float, float, float]]] = {
+        pii: [] for pii in pii_values
+    }
+    lines = page_ocr.lines or []
+    pad = 2.0
+
+    def _pad(x0: float, y0: float, x1: float, y1: float):
+        return (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+
+    line_norms: list[str] = []
+    line_char_word: list[list[int]] = []
+    line_char_offset: list[list[int]] = []
+    line_word_norm_len: list[list[int]] = []
+    line_bboxes: list[tuple[float, float, float, float]] = []
+    for line in lines:
+        norm_parts = []
+        char_word = []
+        char_offset = []
+        word_lens = []
+        for word_idx_in_line, w in enumerate(line):
+            n = _norm(w.text)
+            norm_parts.append(n)
+            word_lens.append(len(n))
+            char_word.extend([word_idx_in_line] * len(n))
+            char_offset.extend(range(len(n)))
+        line_norms.append("".join(norm_parts))
+        line_char_word.append(char_word)
+        line_char_offset.append(char_offset)
+        line_word_norm_len.append(word_lens)
+        line_bboxes.append(_line_bbox(line) if line else (0.0, 0.0, 0.0, 0.0))
+
+    runs: list[list[int]] = []
+    seen_sigs: set[tuple[int, ...]] = set()
+    for anchor in range(len(lines)):
+        anchor_bbox = line_bboxes[anchor]
+        run = [anchor]
+        for j in range(anchor + 1, len(lines)):
+            if _x_overlaps(anchor_bbox, line_bboxes[j]):
+                run.append(j)
+        sig = tuple(run)
+        if sig not in seen_sigs:
+            seen_sigs.add(sig)
+            runs.append(run)
+
+    def _word_subbbox(line_idx: int, word_idx: int,
+                      min_off: int, max_off_excl: int
+                      ) -> tuple[float, float, float, float]:
+        word = lines[line_idx][word_idx]
+        norm_len = line_word_norm_len[line_idx][word_idx]
+        if norm_len == 0 or (min_off == 0 and max_off_excl == norm_len):
+            return (word.x0, word.y0, word.x1, word.y1)
+        width = word.x1 - word.x0
+        sub_x0 = word.x0 + (min_off / norm_len) * width
+        sub_x1 = word.x0 + (max_off_excl / norm_len) * width
+        return (sub_x0, word.y0, sub_x1, word.y1)
+
+    for pii in pii_values:
+        target = _norm(pii)
+        if not target:
+            continue
+        bboxes = by_value[pii]
+        seen_bboxes: set[tuple[float, float, float, float]] = set()
+
+        for run in runs:
+            run_text_parts: list[str] = []
+            run_char_line: list[int] = []
+            run_char_word: list[int] = []
+            run_char_offset: list[int] = []
+            for line_idx in run:
+                txt = line_norms[line_idx]
+                run_text_parts.append(txt)
+                run_char_line.extend([line_idx] * len(txt))
+                run_char_word.extend(line_char_word[line_idx])
+                run_char_offset.extend(line_char_offset[line_idx])
+            run_text = "".join(run_text_parts)
+            if not run_text or len(target) > len(run_text):
+                continue
+
+            start = 0
+            while True:
+                pos = run_text.find(target, start)
+                if pos < 0:
+                    break
+                end = pos + len(target)
+                groups: dict[tuple[int, int], list[int]] = {}
+                order: list[tuple[int, int]] = []
+                for c in range(pos, end):
+                    key = (run_char_line[c], run_char_word[c])
+                    if key not in groups:
+                        groups[key] = []
+                        order.append(key)
+                    groups[key].append(run_char_offset[c])
+                per_line_subs: dict[int, list[tuple[float, float, float, float]]] = {}
+                for line_idx, word_idx in order:
+                    offsets = groups[(line_idx, word_idx)]
+                    sub = _word_subbbox(line_idx, word_idx,
+                                        min(offsets), max(offsets) + 1)
+                    per_line_subs.setdefault(line_idx, []).append(sub)
+                for subs in per_line_subs.values():
+                    x0 = min(b[0] for b in subs)
+                    y0 = min(b[1] for b in subs)
+                    x1 = max(b[2] for b in subs)
+                    y1 = max(b[3] for b in subs)
+                    key = (round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1))
+                    if key in seen_bboxes:
+                        continue
+                    seen_bboxes.add(key)
+                    bboxes.append(_pad(x0, y0, x1, y1))
+                start = end
+
+    return by_value
+
+
+def find_pii_bboxes(
+    page_ocr: PageOcr, pii_values: list[str]
+) -> list[tuple[float, float, float, float]]:
+    """Flat list of bboxes; flattening shim around find_pii_bboxes_by_value."""
+    by_value = find_pii_bboxes_by_value(page_ocr, pii_values)
+    return [bbox for bboxes in by_value.values() for bbox in bboxes]
+
+
+# ── Offset-indexed full text (gliner reverse-mapping) ────────────────
+
+
+@dataclass
+class IndexedSpan:
+    """An OcrSpan's char-offset range inside a reconstructed full_text.
+
+    Used by the gliner code path to reverse-map model-returned entity
+    (start, end) offsets back to specific OCR spans on specific pages,
+    instead of string-matching the entity value against the page.
+    """
+    char_start: int
+    char_end: int
+    page_num: int
+    line_idx: int          # global line index across all pages
+    word_idx_in_line: int
+    word: OcrSpan
+
+
+def build_indexed_full_text(pages: list[PageOcr]) -> tuple[str, list[IndexedSpan]]:
+    """Build the same full_text the LLM/gliner sees, but emit a parallel
+    list of IndexedSpan recording each OCR word's char-offset range inside it.
+
+    Layout:
+      "[Page {N}]\n" + lines joined by "\n" + "\n\n" between pages,
+      where each line is words joined by " ".
+    """
+    parts: list[str] = []
+    spans: list[IndexedSpan] = []
+    cursor = 0
+    global_line_idx = 0
+    for page_idx, page in enumerate(pages):
+        if page_idx > 0:
+            parts.append("\n\n")
+            cursor += 2
+        header = f"[Page {page.page_num}]\n"
+        parts.append(header)
+        cursor += len(header)
+        lines = page.lines or []
+        for li, line in enumerate(lines):
+            if li > 0:
+                parts.append("\n")
+                cursor += 1
+            for wi, w in enumerate(line):
+                if wi > 0:
+                    parts.append(" ")
+                    cursor += 1
+                start = cursor
+                parts.append(w.text)
+                cursor += len(w.text)
+                spans.append(IndexedSpan(
+                    char_start=start,
+                    char_end=cursor,
+                    page_num=page.page_num,
+                    line_idx=global_line_idx + li,
+                    word_idx_in_line=wi,
+                    word=w,
+                ))
+        global_line_idx += len(lines)
+    return "".join(parts), spans
+
+
+def resolve_entities_to_bboxes(
+    word_spans: list[IndexedSpan],
+    entities: list[dict],
+) -> list[dict]:
+    """Map gliner entities (each with global char offsets) to PDF bboxes.
+
+    Returns one result per (entity, line) — multi-line entities yield one
+    bbox per line. Entities that fall entirely in gaps (page headers,
+    whitespace) are silently dropped.
+    """
+    import bisect
+
+    starts = [s.char_start for s in word_spans]
+    results: list[dict] = []
+    pad = 2.0
+
+    for ent in entities:
+        g_start = ent.get("start")
+        g_end = ent.get("end")
+        if g_start is None or g_end is None or g_end <= g_start:
+            continue
+
+        idx = bisect.bisect_left(starts, g_start)
+        if idx > 0 and word_spans[idx - 1].char_end > g_start:
+            idx -= 1
+
+        matched: list[tuple[IndexedSpan, int, int]] = []
+        i = idx
+        while i < len(word_spans) and word_spans[i].char_start < g_end:
+            sp = word_spans[i]
+            ov_start = max(g_start, sp.char_start)
+            ov_end = min(g_end, sp.char_end)
+            if ov_end > ov_start:
+                matched.append((sp, ov_start - sp.char_start, ov_end - sp.char_start))
+            i += 1
+
+        if not matched:
+            continue
+
+        groups: dict[tuple[int, int], list[tuple[IndexedSpan, int, int]]] = {}
+        order: list[tuple[int, int]] = []
+        for entry in matched:
+            key = (entry[0].page_num, entry[0].line_idx)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(entry)
+
+        for key in order:
+            group = groups[key]
+            sub_bboxes: list[tuple[float, float, float, float]] = []
+            for sp, sub_s, sub_e in group:
+                w = sp.word
+                wlen = len(w.text)
+                if wlen == 0 or (sub_s == 0 and sub_e == wlen):
+                    sub_bboxes.append((w.x0, w.y0, w.x1, w.y1))
+                else:
+                    width = w.x1 - w.x0
+                    sx0 = w.x0 + (sub_s / wlen) * width
+                    sx1 = w.x0 + (sub_e / wlen) * width
+                    sub_bboxes.append((sx0, w.y0, sx1, w.y1))
+            x0 = min(b[0] for b in sub_bboxes) - pad
+            x1 = max(b[2] for b in sub_bboxes) + pad
+            y0 = min(b[1] for b in sub_bboxes)
+            y1 = max(b[3] for b in sub_bboxes)
+            results.append({
+                "value": ent.get("text", ""),
+                "type": (ent.get("label") or "").strip().lower(),
+                "page_num": key[0],
+                "bbox": (x0, y0, x1, y1),
+            })
+
+    return results
+
+
+# ── Top-level redaction entry ───────────────────────────────────────
+
+
+def render_redacted_pages(
+    pdf_path: str,
+    page_pii_bboxes: dict[int, list[tuple[float, float, float, float]]],
+    dpi: int = DEFAULT_DPI,
+) -> list:
+    """Render each page and draw black rectangles over PII regions."""
+    from PIL import Image
+
+    pdf = pdfium.PdfDocument(pdf_path)
+    scale = dpi / 72.0
+
+    results: list[tuple[int, "Image.Image"]] = []
+    for page_idx in range(len(pdf)):
+        page_num = page_idx + 1
+        page = pdf[page_idx]
+        bitmap = page.render(scale=scale)
+        img = bitmap.to_pil()
+        img_h = img.height
+
+        bboxes = page_pii_bboxes.get(page_num, [])
+        if bboxes:
+            draw = ImageDraw.Draw(img)
+            for x0, y0, x1, y1 in bboxes:
+                px_x0 = x0 * scale
+                px_x1 = x1 * scale
+                px_y0 = img_h - y1 * scale
+                px_y1 = img_h - y0 * scale
+                draw.rectangle([px_x0, px_y0, px_x1, px_y1], fill="black")
+
+        results.append((page_num, img.convert("RGB")))
+
+    pdf.close()
+    return results
+
+
+def scrub_with_ocr(
+    pdf_path: str,
+    page_pii_bboxes: dict[int, list[tuple[float, float, float, float]]],
+    output_path: str,
+    dpi: int = DEFAULT_DPI,
+) -> None:
+    """Redact PDF by drawing on rasterized page images, then save as PDF."""
+    pages = render_redacted_pages(pdf_path, page_pii_bboxes, dpi=dpi)
+    if not pages:
+        return
+    images = [img for _, img in pages]
+    images[0].save(
+        output_path,
+        "PDF",
+        resolution=dpi,
+        save_all=True,
+        append_images=images[1:],
+    )
 
 
 __all__ = [
