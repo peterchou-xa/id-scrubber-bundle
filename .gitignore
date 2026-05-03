@@ -16,6 +16,9 @@ identity-scrubber/build/
 # Scrubbed output PDFs
 *_scrubbed.pdf
 
+# Local ONNX model artifacts (regenerable via export_gliner_onnx.py)
+identity-scrubber/resources/models/
+
 # Env / secrets
 .env
 

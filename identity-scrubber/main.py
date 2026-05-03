@@ -253,12 +253,17 @@ _GLINER_LABELS = [
     "date_of_birth",
     "passport_number",
     "national_id", "ssn",
-    "street_address", "address", "mailing_address",
+    "street_address",
     "credit_card", "bank_account_number",
     "ip_address", "city", "state", "postcode", "po_box"
 ]
 
 _GLINER_MODEL = None
+
+# Set by --gliner-onnx-dir on the CLI to switch from PyTorch to onnxruntime.
+# When None, the original HF PyTorch checkpoint is used.
+_GLINER_ONNX_DIR: str | None = None
+_GLINER_ONNX_FILE: str = "model_fp16.onnx"
 
 
 def _get_gliner_model():
@@ -269,32 +274,28 @@ def _get_gliner_model():
         from gliner import GLiNER
     except ImportError:
         sys.exit("gliner not installed. Run: pip install gliner")
-    print(f"[gliner] loading {_GLINER_MODEL_NAME}...", file=sys.stderr, flush=True)
     t0 = time.monotonic()
-    _GLINER_MODEL = GLiNER.from_pretrained(_GLINER_MODEL_NAME)
+    if _GLINER_ONNX_DIR:
+        print(
+            f"[gliner] loading ONNX model from {_GLINER_ONNX_DIR} ({_GLINER_ONNX_FILE})...",
+            file=sys.stderr, flush=True,
+        )
+        _GLINER_MODEL = GLiNER.from_pretrained(
+            _GLINER_ONNX_DIR,
+            load_onnx_model=True,
+            load_tokenizer=True,
+            onnx_model_file=_GLINER_ONNX_FILE,
+        )
+    else:
+        print(f"[gliner] loading {_GLINER_MODEL_NAME}...", file=sys.stderr, flush=True)
+        _GLINER_MODEL = GLiNER.from_pretrained(_GLINER_MODEL_NAME)
     print(f"[gliner] model loaded in {time.monotonic() - t0:.1f}s", file=sys.stderr, flush=True)
     return _GLINER_MODEL
 
 
-def query_gliner(text_chunk: str, threshold: float = 0.5) -> list[dict]:
-    """Run nvidia/gliner-pii on a text chunk and return [{type, value}] items."""
-    model = _get_gliner_model()
-    t0 = time.monotonic()
-    entities = model.predict_entities(text_chunk, _GLINER_LABELS, threshold=threshold)
-    print(
-        f"[gliner] {len(entities)} entities in {time.monotonic() - t0:.1f}s",
-        file=sys.stderr, flush=True,
-    )
-    items = []
-    for ent in entities:
-        raw_label = (ent.get("label") or "").strip().lower()
-        value = (ent.get("text") or "").strip()
-        if value and raw_label:
-            items.append({"type": raw_label, "value": value})
-    return [it for it in items if is_valid_pii_item(it)]
+GLINER_THRESHOLD = 0.3
 
-
-def query_gliner_entities(text_chunk: str, threshold: float = 0.3) -> list[dict]:
+def query_gliner_entities(text_chunk: str) -> list[dict]:
     """Run nvidia/gliner-pii and preserve per-entity char offsets.
 
     Returns raw [{start, end, text, label}, ...] entities so the caller
@@ -304,7 +305,7 @@ def query_gliner_entities(text_chunk: str, threshold: float = 0.3) -> list[dict]
     """
     model = _get_gliner_model()
     t0 = time.monotonic()
-    entities = model.predict_entities(text_chunk, _GLINER_LABELS, threshold=threshold)
+    entities = model.predict_entities(text_chunk, _GLINER_LABELS, threshold=GLINER_THRESHOLD)
     print(
         f"[gliner] {len(entities)} entities in {time.monotonic() - t0:.1f}s",
         file=sys.stderr, flush=True,
@@ -713,9 +714,22 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
 
     if debug_full_text:
         full_text_path = _default_full_text_path(path)
+        overlap = min(200, chunk_size // 10)
+        chunks: list[str] = []
+        pos = 0
+        while pos < len(full_text):
+            chunks.append(full_text[pos:pos + chunk_size])
+            pos += chunk_size - overlap
+        if not chunks:
+            chunks = [full_text]
+        sep = "\n\n" + ("=" * 80) + "\n\n"
         try:
             with open(full_text_path, "w", encoding="utf-8") as f:
-                f.write(full_text)
+                for i, ch in enumerate(chunks, start=1):
+                    f.write(f"[chunk {i}/{len(chunks)}]\n")
+                    f.write(ch)
+                    if i < len(chunks):
+                        f.write(sep)
             print(f"[detect] full OCR text saved to: {full_text_path}", file=sys.stderr)
         except OSError as exc:
             print(f"[detect] failed to write full text: {exc!r}", file=sys.stderr)
@@ -932,7 +946,7 @@ def main():
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=2500,
+        default=1000,
         help="Number of characters per chunk sent to the model",
     )
     parser.add_argument(
@@ -963,6 +977,20 @@ def main():
         help="DPI used when rendering pages for OCR.",
     )
     parser.add_argument(
+        "--gliner-onnx-dir",
+        default=None,
+        help=(
+            "Load GLiNER from this ONNX-export directory using onnxruntime "
+            "instead of the PyTorch checkpoint. Directory must contain the "
+            "files produced by export_gliner_onnx.py."
+        ),
+    )
+    parser.add_argument(
+        "--gliner-onnx-file",
+        default="model_fp16.onnx",
+        help="ONNX file inside --gliner-onnx-dir to load (e.g. model.onnx for fp32).",
+    )
+    parser.add_argument(
         "--debug-full-text",
         action="store_true",
         help=(
@@ -971,6 +999,11 @@ def main():
         ),
     )
     args = parser.parse_args()
+
+    if args.gliner_onnx_dir:
+        global _GLINER_ONNX_DIR, _GLINER_ONNX_FILE
+        _GLINER_ONNX_DIR = args.gliner_onnx_dir
+        _GLINER_ONNX_FILE = args.gliner_onnx_file
 
     if args.serve:
         sys.exit(_serve_loop(args))
