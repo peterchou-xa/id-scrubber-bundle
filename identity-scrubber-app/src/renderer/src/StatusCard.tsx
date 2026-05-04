@@ -1,16 +1,9 @@
 import { ProgressBar } from './ProgressBar';
-import type { SetupState } from './useOllamaSetup';
+import type { SetupState } from './useGlinerSetup';
 
 type Props = {
   state: SetupState;
-  onInstall: () => void;
   onRetry: () => void;
-};
-
-const INSTALL_STEP_LABELS: Record<NonNullable<SetupState['step']>, string> = {
-  mount: 'Mounting installer…',
-  copy: 'Copying Ollama into ~/Applications…',
-  quarantine: 'Finalizing installation…',
 };
 
 function formatBytes(bytes?: number): string {
@@ -18,13 +11,13 @@ function formatBytes(bytes?: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function StatusCard({ state, onInstall, onRetry }: Props): JSX.Element {
+export function StatusCard({ state, onRetry }: Props): JSX.Element {
   return (
     <section className="bg-card border border-border rounded-xl shadow-sm p-6 flex flex-col gap-4">
       <StatusText state={state} />
       <StatusProgress state={state} />
       <StatusHint state={state} />
-      <StatusActions state={state} onInstall={onInstall} onRetry={onRetry} />
+      <StatusActions state={state} onRetry={onRetry} />
     </section>
   );
 }
@@ -34,19 +27,11 @@ function StatusText({ state }: { state: SetupState }): JSX.Element {
   const text = ((): string => {
     switch (state.stage) {
       case 'checking':
-        return 'Checking for Ollama…';
-      case 'idle':
-        return 'Ollama is not installed';
+        return 'Checking for PII model…';
       case 'downloading':
-        return 'Downloading Ollama…';
-      case 'installing':
-        return state.step ? INSTALL_STEP_LABELS[state.step] : 'Installing…';
-      case 'starting':
-        return 'Starting Ollama service…';
-      case 'pulling':
-        return `Downloading AI model${state.model ? ` (${state.model})` : ''}…`;
+        return 'Downloading PII model…';
       case 'done':
-        return 'AI engine is ready';
+        return 'PII model is ready';
       case 'error':
         return 'Setup failed';
     }
@@ -60,60 +45,26 @@ function StatusText({ state }: { state: SetupState }): JSX.Element {
 }
 
 function StatusProgress({ state }: { state: SetupState }): JSX.Element | null {
-  if (state.stage === 'downloading') {
-    const percent = Math.round((state.percent ?? 0) * 100);
-    const received = formatBytes(state.received);
-    const total = formatBytes(state.total);
-    const label = total ? `${received} / ${total} (${percent}%)` : received;
-    return <ProgressBar percent={percent} label={label} />;
-  }
-  if (state.stage === 'installing') {
-    return <ProgressBar percent={100} label="Please wait" />;
-  }
-  if (state.stage === 'starting') {
-    return <ProgressBar percent={100} label="Almost ready" />;
-  }
-  if (state.stage === 'pulling') {
-    const hasBytes = typeof state.total === 'number' && state.total > 0;
-    const label = humanizePullStatus(state.pullStatus);
-    if (hasBytes) {
-      const percent = Math.round((state.percent ?? 0) * 100);
-      const received = formatBytes(state.received);
-      const total = formatBytes(state.total);
-      const byteLabel = `${label} · ${received} / ${total} (${percent}%)`;
-      return <ProgressBar percent={percent} label={byteLabel} />;
-    }
-    return <IndeterminateStatus label={label} />;
-  }
-  return null;
-}
-
-function IndeterminateStatus({ label }: { label: string }): JSX.Element {
-  return (
-    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-      <span className="inline-block w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-      <span>{label}</span>
-    </div>
-  );
-}
-
-function humanizePullStatus(status?: string): string {
-  if (!status) return 'Preparing…';
-  if (status === 'pulling manifest') return 'Fetching manifest…';
-  if (status.startsWith('pulling ')) return `pulling ${status.slice('pulling '.length)}`;
-  if (status.startsWith('verifying')) return 'Verifying digest…';
-  if (status === 'writing manifest') return 'Finalizing…';
-  if (status === 'success') return 'Done';
-  return status;
+  if (state.stage !== 'downloading') return null;
+  const percent = Math.round((state.percent ?? 0) * 100);
+  const received = formatBytes(state.received);
+  const total = formatBytes(state.total);
+  const sublabel =
+    state.fileCount && state.fileCount > 1 && state.file
+      ? `${state.file} (${state.fileIndex}/${state.fileCount})`
+      : '';
+  const bytesLabel = total ? `${received} / ${total} (${percent}%)` : received;
+  const label = sublabel ? `${sublabel} · ${bytesLabel}` : bytesLabel;
+  return <ProgressBar percent={percent} label={label} />;
 }
 
 function StatusHint({ state }: { state: SetupState }): JSX.Element | null {
   const hint = ((): string | null => {
     switch (state.stage) {
-      case 'idle':
-        return 'We\u2019ll download it to ~/Applications. No password required.';
+      case 'downloading':
+        return 'One-time download (~850 MB). Cached locally for future launches.';
       case 'done':
-        return state.location ? `Installed at ${state.location}` : null;
+        return state.dir ? `Cached at ${state.dir}` : null;
       case 'error':
         return state.message ?? 'Something went wrong.';
       default:
@@ -127,25 +78,11 @@ function StatusHint({ state }: { state: SetupState }): JSX.Element | null {
 
 function StatusActions({
   state,
-  onInstall,
   onRetry,
 }: {
   state: SetupState;
-  onInstall: () => void;
   onRetry: () => void;
 }): JSX.Element | null {
-  if (state.stage === 'idle') {
-    return (
-      <div className="flex justify-end gap-3">
-        <button
-          onClick={onInstall}
-          className="px-4 py-2 bg-primary hover:bg-primary/90 text-primary-foreground text-sm font-medium rounded-lg transition-colors"
-        >
-          Install
-        </button>
-      </div>
-    );
-  }
   if (state.stage === 'error') {
     return (
       <div className="flex justify-end gap-3">

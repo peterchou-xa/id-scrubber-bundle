@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-PII Detector: Parses a PDF and uses Ollama (gemma3) to detect personally
-identifiable information (PII), returning a JSON summary of types and counts.
+PII Detector: parses a PDF, OCRs each page, and uses GLiNER (nvidia/gliner-pii
+via onnxruntime) to detect personally identifiable information.
 
 Usage:
-    python main.py <path_to_pdf> [--model gemma3] [--chunk-size 3000]
+    python main.py <path_to_pdf> --scrub \\
+        --gliner-onnx-dir <dir> --gliner-onnx-file model_fp16.onnx
 """
 
 import argparse
@@ -19,229 +20,23 @@ import traceback
 from collections import defaultdict
 from pathlib import Path
 
-_PROXY_ENV_KEYS = (
-    "http_proxy", "https_proxy", "all_proxy",
-    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-)
-_popped = {k: os.environ.pop(k, None) for k in _PROXY_ENV_KEYS if k in os.environ}
-if _popped:
-    print(f"[startup] popped proxy env: {_popped}", file=sys.stderr, flush=True)
-
-try:
-    import ollama
-except ImportError:
-    sys.exit("ollama not installed. Run: pip install ollama")
-
-
-
-PII_CATEGORIES = [
-    "full_name",
+# Canonical, end-user-facing PII categories. The UI groups detections by
+# these values, so they need to read naturally (e.g. "Name", not "Full Name"
+# / "First Name" / "Last Name" as three separate sections). Order here is
+# the display order.
+PII_CATEGORY_LABELS = [
+    "name",
     "date_of_birth",
+    "email",
+    "phone_number",
+    "address",
     "passport_number",
     "national_id",
-    "email_address",
-    "phone_number",
-    "home_address",
-    "social_security_number",
-    "credit_card_number",
-    "bank_account_number",
+    "credit_card",
+    "bank_account",
     "ip_address",
-    "other_pii",
+    "other",
 ]
-
-SYSTEM_PROMPT = """\
-You are a PII (Personally Identifiable Information) detection assistant.
-Your task is to analyze text and identify every occurrence of PII.
-
-For each piece of PII found, output a JSON array where each element has
-exactly two fields:
-- "type": one of {categories}
-- "value": the exact string found
-
-Example output:
-[{{"type": "full_name", "value": "Jane Doe"}}, {{"type": "email_address", "value": "jane.doe@example.com"}}]
-
-Each "value" must be one full PII item.
-Do not include field labels, column headers, or adjacent unrelated tokens
-in the value. US-format examples of the acceptable variety per category:
-- full_name: "Jane Doe", "Dr. Alan T. Turing", "Mary-Jane O'Neill",
-  "Robert E. Lee Jr.", "J. K. Rowling"
-- date_of_birth: "03/14/1987", "3/14/87", "March 14, 1987",
-  "Mar 14, 1987", "1987-03-14", "14-MAR-1987"
-- passport_number: "A12345678", "123456789" (9 alphanumeric chars)
-- national_id: "123-45-6789", "123456789" (treat same as SSN if in doubt)
-- email_address: "jane.doe@example.com", "j.doe+tag@sub.example.co",
-  "first_last@example.org"
-- phone_number: "(415) 555-0199", "415-555-0199", "415.555.0199",
-  "+1-415-555-0199", "4155550199", "1 (415) 555-0199 ext. 1234"
-- home_address: "742 Evergreen Terrace, Springfield, IL 62704",
-  "1234 S Maple St Apt 5 Anytown, NY 10001",
-  "P.O. Box 1234, Anytown, CA 90210"
-- social_security_number: "123-45-6789", "123456789", "XXX-XX-6789"
-- credit_card_number: "4111 1111 1111 1111", "4111-1111-1111-1111",
-  "4111111111111111", "378282246310005" (15-digit Amex)
-- bank_account_number: "000123456789", "12345678" (8–17 digits),
-  routing+account pairs like "021000021 000123456789"
-- ip_address: "192.0.2.42", "2001:db8::1", "::ffff:192.0.2.42"
-- other_pii: a single specific identifier not covered above (e.g.
-  "driver's license D1234567", "EIN 12-3456789"), never a sentence
-
-Rules:
-- Be thorough — find ALL occurrences.
-- Do not infer or hallucinate values. Only report what is explicitly present.
-- If a line contains multiple PII items, emit each as its own entry.
-- If no PII is found, return an empty array: []
-- Output ONLY the raw JSON array, no markdown fences, no explanation.
-""".format(categories=json.dumps(PII_CATEGORIES))
-
-
-def chunk_text(text: str, chunk_size: int) -> list[str]:
-    """Split text into overlapping chunks to stay within context limits."""
-    overlap = min(200, chunk_size // 10)
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
-        start += chunk_size - overlap
-    return chunks
-
-
-_OLLAMA_CLIENT = None
-
-
-def _get_client():
-    """Build a single ollama.Client that explicitly disables HTTP proxies.
-    Without this the underlying httpx Client picks up http_proxy /
-    https_proxy / ALL_PROXY from the environment and tries to route
-    127.0.0.1:11434 traffic through them, which silently hangs.
-    """
-    global _OLLAMA_CLIENT
-    if _OLLAMA_CLIENT is not None:
-        return _OLLAMA_CLIENT
-
-    host = os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
-    print(f"[ollama] building client host={host} (proxy disabled, timeout=120s)", file=sys.stderr, flush=True)
-    # `proxy=None` overrides httpx's env-based proxy detection. trust_env=False
-    # also stops httpx from re-reading HTTP_PROXY / NO_PROXY at request time.
-    try:
-        import httpx
-        transport = httpx.HTTPTransport(proxy=None, retries=0)
-        _OLLAMA_CLIENT = ollama.Client(host=host, timeout=120.0, trust_env=False, transport=transport)
-        print("[ollama] client variant=full (trust_env=False, proxy=None)", file=sys.stderr, flush=True)
-    except TypeError as exc:
-        # Older ollama versions don't accept transport/trust_env kwargs.
-        _OLLAMA_CLIENT = ollama.Client(host=host, timeout=120.0)
-        print(f"[ollama] client variant=fallback (TypeError on full kwargs: {exc!r})", file=sys.stderr, flush=True)
-    return _OLLAMA_CLIENT
-
-
-def _chat_once(model: str, user_message: str):
-    client = _get_client()
-    print(f"[ollama chat] -> POST /api/chat model={model} msg_len={len(user_message)}", file=sys.stderr, flush=True)
-    t0 = time.monotonic()
-    try:
-        response = client.chat(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            options={"temperature": 0},
-        )
-    except Exception as exc:
-        elapsed = time.monotonic() - t0
-        print(f"[ollama chat] <- FAILED after {elapsed:.1f}s: {type(exc).__name__}: {exc!r}", file=sys.stderr, flush=True)
-        raise
-    elapsed = time.monotonic() - t0
-    print(f"[ollama chat] <- OK in {elapsed:.1f}s", file=sys.stderr, flush=True)
-    return response
-
-
-def query_ollama(text_chunk: str, model: str) -> list[dict]:
-    """Send a text chunk to Ollama and parse the PII JSON response."""
-    user_message = (
-        "Analyze the following text and return all PII as a JSON array:\n\n"
-        + text_chunk
-    )
-
-    transient_statuses = {502, 503, 504}
-    max_attempts = 8
-    response = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            if attempt == 1:
-                proxy_env = {
-                    k: v
-                    for k, v in os.environ.items()
-                    if "proxy" in k.lower()
-                }
-                print(
-                    f"[ollama chat] attempt=1 host={os.environ.get('OLLAMA_HOST') or '(default)'} "
-                    f"proxy_env={proxy_env}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            response = _chat_once(model, user_message)
-            break
-        except ollama.ResponseError as exc:
-            status = getattr(exc, "status_code", None)
-            err_attr = getattr(exc, "error", None)
-            body = getattr(getattr(exc, "response", None), "text", None)
-            detail = (
-                f"attempt={attempt}/{max_attempts} status={status} error={err_attr!r} "
-                f"body={body!r} repr={exc!r} "
-                f"host={os.environ.get('OLLAMA_HOST') or '(default)'} model={model}"
-            )
-            print(f"[ollama chat failed] {detail}", file=sys.stderr, flush=True)
-
-            if "not found" in str(exc).lower() or "pull" in str(exc).lower():
-                print(f"Model '{model}' not found locally. Pulling now...")
-                try:
-                    ollama.pull(model)
-                except Exception as pull_exc:
-                    sys.exit(f"Failed to pull model '{model}': {pull_exc}")
-                response = _chat_once(model, user_message)
-                break
-
-            if status in transient_statuses and attempt < max_attempts:
-                wait = min(2 ** (attempt - 1), 10)
-                print(
-                    f"[ollama chat] transient {status}, retrying in {wait}s...",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                time.sleep(wait)
-                continue
-
-            raise RuntimeError(f"Ollama error on chunk: {exc}") from exc
-
-    if response is None:
-        raise RuntimeError("Ollama chat returned no response after retries")
-
-    raw = response["message"]["content"].strip()
-
-    # Strip markdown code fences if present
-    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
-    raw = re.sub(r"\s*```$", "", raw)
-
-    try:
-        items = json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r"\[.*\]", raw, re.DOTALL)
-        if match:
-            try:
-                items = json.loads(match.group())
-            except json.JSONDecodeError:
-                print("Warning: Could not parse model response as JSON.", file=sys.stderr)
-                return []
-        else:
-            print("Warning: Could not parse model response as JSON.", file=sys.stderr)
-            return []
-
-    if not isinstance(items, list):
-        return []
-    return [it for it in items if isinstance(it, dict) and is_valid_pii_item(it)]
 
 
 _GLINER_MODEL_NAME = "nvidia/gliner-pii"
@@ -255,8 +50,34 @@ _GLINER_LABELS = [
     "national_id", "ssn",
     "street_address",
     "credit_card", "bank_account_number",
-    "ip_address", "city", "state", "postcode", "po_box"
+    "ip_address", "city", "state", "postcode", "po_box",
 ]
+
+# Each raw gliner label collapses to one user-facing category. Anything not
+# in this map falls through to "other".
+_GLINER_LABEL_TO_CATEGORY = {
+    "full_name": "name",
+    "first_name": "name",
+    "last_name": "name",
+    "email": "email",
+    "phone_number": "phone_number",
+    "date_of_birth": "date_of_birth",
+    "passport_number": "passport_number",
+    "national_id": "national_id",
+    "ssn": "ssn",
+    "street_address": "address",
+    "city": "address",
+    "state": "address",
+    "postcode": "address",
+    "po_box": "address",
+    "credit_card": "credit_card",
+    "bank_account_number": "bank_account",
+    "ip_address": "ip_address",
+}
+
+
+def gliner_label_to_category(label: str) -> str:
+    return _GLINER_LABEL_TO_CATEGORY.get((label or "").strip().lower(), "other")
 
 _GLINER_MODEL = None
 
@@ -314,6 +135,14 @@ def query_gliner_entities(text_chunk: str) -> list[dict]:
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+DEFAULT_SCRUB_COLOR = "#DC2626"
+
+
+def _normalize_hex_color(value: str | None, fallback: str) -> str:
+    if not value:
+        return fallback
+    return value if HEX_COLOR_RE.match(value) else fallback
 
 
 def is_valid_pii_item(item: dict) -> bool:
@@ -326,7 +155,7 @@ def is_valid_pii_item(item: dict) -> bool:
     value = (item.get("value") or "").strip()
     if not value:
         return False
-    if pii_type == "email_address" and not EMAIL_RE.match(value):
+    if pii_type == "email" and not EMAIL_RE.match(value):
         return False
     return True
 
@@ -354,19 +183,19 @@ def aggregate_results(all_items: list[dict]) -> list[dict]:
     seen: dict[tuple[str, str], int] = defaultdict(int)  # (type, value) -> count
 
     for item in all_items:
-        pii_type = item.get("type", "other_pii").strip().lower()
+        pii_type = item.get("type", "other").strip().lower()
         value = item.get("value", "").strip()
 
         if not value:
             continue
 
-        if pii_type not in PII_CATEGORIES:
-            pii_type = "other_pii"
+        if pii_type not in PII_CATEGORY_LABELS:
+            pii_type = "other"
 
         seen[(pii_type, value)] += 1
 
     # Sort by category order then value
-    cat_order = {c: i for i, c in enumerate(PII_CATEGORIES)}
+    cat_order = {c: i for i, c in enumerate(PII_CATEGORY_LABELS)}
     return [
         {"value": value, "type": pii_type, "occurrences": count}
         for (pii_type, value), count in sorted(
@@ -479,7 +308,9 @@ def _run_ocr_scrub(args, input_pdf: str, output_pdf: str, *, do_scrub: bool) -> 
                         cached[v].append((page.page_num, pdf_bbox))
 
         print(f"Redacting PDF (rasterizing at {args.ocr_dpi} DPI)...", file=sys.stderr)
-        _serve_scrub({"selected": selected, "output": output_pdf}, state, emit=cli_emit)
+        _serve_scrub(
+            {"selected": selected, "output": output_pdf}, state, args, emit=cli_emit,
+        )
         if failed["value"]:
             return False
 
@@ -616,7 +447,7 @@ def _detect_via_gliner_offsets(
                 )
 
         for r in resolved:
-            item = {"type": r["type"], "value": r["value"]}
+            item = {"type": gliner_label_to_category(r["type"]), "value": r["value"]}
             if not is_valid_pii_item(item):
                 continue
             page_num = r["page_num"]
@@ -704,13 +535,15 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
             "image_height": p.image_height,
         })
 
-    use_gliner = model == _GLINER_MODEL_NAME
+    if model != _GLINER_MODEL_NAME:
+        emit({
+            "event": "error",
+            "cmd": "detect",
+            "message": f"unsupported model {model!r}; only {_GLINER_MODEL_NAME!r} is supported",
+        })
+        return
 
-    if use_gliner:
-        full_text, word_spans = ocr_scrub.build_indexed_full_text(pages)
-    else:
-        full_text = "\n\n".join(f"[Page {p.page_num}]\n{p.text}" for p in pages)
-        word_spans = None
+    full_text, word_spans = ocr_scrub.build_indexed_full_text(pages)
 
     if debug_full_text:
         full_text_path = _default_full_text_path(path)
@@ -739,62 +572,19 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
     scale = ocr_dpi / 72.0
     page_height_by_num = {p.page_num: p.page_height for p in pages}
 
-    if use_gliner:
-        all_items, gliner_failed = _detect_via_gliner_offsets(
-            ocr_scrub=ocr_scrub,
-            full_text=full_text,
-            word_spans=word_spans,
-            chunk_size=chunk_size,
-            bboxes_pdf_by_value=bboxes_pdf_by_value,
-            bboxes_px_by_value=bboxes_px_by_value,
-            scale=scale,
-            page_height_by_num=page_height_by_num,
-            emit=emit,
-        )
-        if gliner_failed:
-            return
-    else:
-        chunks = chunk_text(full_text, chunk_size)
-        all_items = []
-        for i, chunk in enumerate(chunks, start=1):
-            try:
-                items = query_ollama(chunk, model)
-            except Exception as exc:
-                tb = traceback.format_exc()
-                print(tb, file=sys.stderr)
-                emit({
-                    "event": "error",
-                    "cmd": "detect",
-                    "message": f"ollama failed on chunk {i}: {type(exc).__name__}: {exc!r}",
-                    "traceback": tb,
-                })
-                return
-            for item in items:
-                emit({"event": "pii", "cmd": "detect", "item": item})
-            all_items.extend(items)
-            emit({
-                "event": "progress",
-                "cmd": "detect",
-                "stage": "chunk",
-                "chunk": i,
-                "total": len(chunks),
-            })
-
-        detected_values = sorted({
-            item["value"].strip()
-            for item in all_items
-            if isinstance(item.get("value"), str) and item["value"].strip()
-        })
-        for v in detected_values:
-            bboxes_pdf_by_value.setdefault(v, [])
-            bboxes_px_by_value.setdefault(v, [])
-        for page in pages:
-            per_value = ocr_scrub.find_pii_bboxes_by_value(page, detected_values)
-            for value, pdf_bboxes in per_value.items():
-                for pdf_bbox in pdf_bboxes:
-                    bboxes_pdf_by_value[value].append((page.page_num, pdf_bbox))
-                    px = _pdf_bbox_to_pixel(pdf_bbox, page.page_height, scale)
-                    bboxes_px_by_value[value].append({"page_num": page.page_num, **px})
+    all_items, gliner_failed = _detect_via_gliner_offsets(
+        ocr_scrub=ocr_scrub,
+        full_text=full_text,
+        word_spans=word_spans,
+        chunk_size=chunk_size,
+        bboxes_pdf_by_value=bboxes_pdf_by_value,
+        bboxes_px_by_value=bboxes_px_by_value,
+        scale=scale,
+        page_height_by_num=page_height_by_num,
+        emit=emit,
+    )
+    if gliner_failed:
+        return
 
     aggregated = aggregate_results(all_items)
 
@@ -817,7 +607,7 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
     })
 
 
-def _serve_scrub(req: dict, state: dict, emit=_emit) -> None:
+def _serve_scrub(req: dict, state: dict, defaults: argparse.Namespace | None = None, emit=_emit) -> None:
     if "bboxes_pdf_by_value" not in state:
         emit({
             "event": "error",
@@ -844,6 +634,12 @@ def _serve_scrub(req: dict, state: dict, emit=_emit) -> None:
     output_pdf = req.get("output") or _default_scrubbed_path(input_pdf)
     ocr_scrub = state["ocr_module"]
     ocr_dpi = state["ocr_dpi"]
+    default_color = (
+        getattr(defaults, "scrub_color", DEFAULT_SCRUB_COLOR)
+        if defaults is not None
+        else DEFAULT_SCRUB_COLOR
+    )
+    fill_color = _normalize_hex_color(req.get("color"), default_color)
     cached: dict[str, list[tuple[int, tuple[float, float, float, float]]]] = state["bboxes_pdf_by_value"]
 
     page_bboxes: dict[int, list[tuple[float, float, float, float]]] = {}
@@ -872,7 +668,9 @@ def _serve_scrub(req: dict, state: dict, emit=_emit) -> None:
         return
 
     try:
-        ocr_scrub.scrub_with_ocr(input_pdf, page_bboxes, output_pdf, dpi=ocr_dpi)
+        ocr_scrub.scrub_with_ocr(
+            input_pdf, page_bboxes, output_pdf, dpi=ocr_dpi, fill_color=fill_color,
+        )
     except Exception as exc:
         tb = traceback.format_exc()
         print(tb, file=sys.stderr)
@@ -910,7 +708,7 @@ def _serve_loop(defaults: argparse.Namespace) -> int:
             if cmd == "detect":
                 _serve_detect(req, state, defaults)
             elif cmd == "scrub":
-                _serve_scrub(req, state)
+                _serve_scrub(req, state, defaults)
             elif cmd == "close":
                 break
             else:
@@ -922,7 +720,7 @@ def _serve_loop(defaults: argparse.Namespace) -> int:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Detect PII in a PDF file using Ollama (gemma3).",
+        description="Detect PII in a PDF file using GLiNER (nvidia/gliner-pii) over OCR'd text.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -940,8 +738,11 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default="gemma3:4b",
-        help="Ollama model to use (e.g. gemma3, gemma3:4b, gemma2)",
+        default=_GLINER_MODEL_NAME,
+        help=(
+            "PII detection model. Only nvidia/gliner-pii is supported; the flag "
+            "exists so callers can pin the value explicitly."
+        ),
     )
     parser.add_argument(
         "--chunk-size",
@@ -958,22 +759,30 @@ def main():
         nargs="+",
         help=(
             "Custom PII values to scrub. Pass one or more values after the flag "
-            "when a value may not be detected by Ollama."
+            "when a value may not be detected by GLiNER."
         ),
     )
     parser.add_argument(
         "--scrub",
         action="store_true",
         help=(
-            "Render each page to an image, OCR it, send the OCR text to the "
-            "LLM for PII detection, then redact by drawing black rectangles "
-            "over detected PII and rasterizing the output."
+            "Render each page to an image, OCR it, run GLiNER on the OCR text "
+            "for PII detection, then redact by drawing black rectangles over "
+            "detected PII and rasterizing the output."
+        ),
+    )
+    parser.add_argument(
+        "--scrub-color",
+        default=DEFAULT_SCRUB_COLOR,
+        help=(
+            "Hex color (e.g. '#DC2626') used to fill redaction rectangles. "
+            "Overridden per-request by 'color' in serve mode."
         ),
     )
     parser.add_argument(
         "--ocr-dpi",
         type=int,
-        default=600,
+        default=300,
         help="DPI used when rendering pages for OCR.",
     )
     parser.add_argument(
@@ -999,6 +808,9 @@ def main():
         ),
     )
     args = parser.parse_args()
+
+    if not HEX_COLOR_RE.match(args.scrub_color or ""):
+        parser.error(f"--scrub-color must be a hex like '#DC2626' (got {args.scrub_color!r})")
 
     if args.gliner_onnx_dir:
         global _GLINER_ONNX_DIR, _GLINER_ONNX_FILE

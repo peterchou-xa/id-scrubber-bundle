@@ -3,20 +3,15 @@ import path from 'path';
 import { pathToFileURL } from 'url';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
 import {
-  isOllamaInstalled,
-  installOllama,
-  startOllama,
-  pingOllama,
-  isModelInstalled,
-  ensureModel,
-  MODEL_NAME,
-  USER_OLLAMA_APP,
-  ProgressEvent,
-} from './ollama';
+  ensureGlinerModel,
+  getGlinerStatus,
+  GlinerProgress,
+  GlinerStatus,
+} from './gliner';
 import { scrubberService, ServeEvent } from './scrubber';
 
 let mainWindow: BrowserWindow | null = null;
-let installInFlight = false;
+let downloadInFlight = false;
 
 // Custom scheme so the renderer can <img src="idscrub-img:///abs/path/page-1.png">
 // without tripping over file:// security restrictions. Must be registered as
@@ -59,9 +54,26 @@ function createWindow(): void {
   }
 }
 
-function emitProgress(payload: ProgressEvent): void {
+function emitGlinerProgress(payload: GlinerProgress): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('ollama:progress', payload);
+    mainWindow.webContents.send('gliner:progress', payload);
+  }
+}
+
+async function startGlinerDownload(): Promise<{ ok: true; dir: string } | { ok: false; error: string }> {
+  if (downloadInFlight) {
+    return { ok: false, error: 'Download already in progress' };
+  }
+  downloadInFlight = true;
+  try {
+    const dir = await ensureGlinerModel(emitGlinerProgress);
+    return { ok: true, dir };
+  } catch (err) {
+    const message = (err as Error).message;
+    emitGlinerProgress({ stage: 'error', message });
+    return { ok: false, error: message };
+  } finally {
+    downloadInFlight = false;
   }
 }
 
@@ -81,28 +93,12 @@ app.whenReady().then(() => {
     optimizer.watchWindowShortcuts(window);
   });
 
-  ipcMain.handle('ollama:status', async () => {
-    const detected = await isOllamaInstalled();
-    const running = await pingOllama();
-    const modelReady = running ? await isModelInstalled(MODEL_NAME) : false;
-    return { ...detected, running, modelReady, model: MODEL_NAME };
+  ipcMain.handle('gliner:status', async (): Promise<GlinerStatus> => {
+    return getGlinerStatus();
   });
 
-  ipcMain.handle('ollama:install', async () => {
-    if (installInFlight) {
-      return { ok: false, error: 'Install already in progress' };
-    }
-    installInFlight = true;
-    try {
-      const result = await installOllama({ onEvent: emitProgress });
-      return { ok: true, ...result };
-    } catch (err) {
-      const message = (err as Error).message;
-      emitProgress({ stage: 'error', message });
-      return { ok: false, error: message };
-    } finally {
-      installInFlight = false;
-    }
+  ipcMain.handle('gliner:download', async () => {
+    return startGlinerDownload();
   });
 
   const forwardEvent = (evt: ServeEvent): void => {
@@ -129,12 +125,11 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('scrubber:scrub', async (_evt, selected: string[]) => {
+  ipcMain.handle('scrubber:scrub', async (_evt, selected: string[], color?: string) => {
     try {
-      const result = await scrubberService.runCommand(
-        { cmd: 'scrub', selected },
-        forwardEvent,
-      );
+      const req: Record<string, unknown> = { cmd: 'scrub', selected };
+      if (color) req.color = color;
+      const result = await scrubberService.runCommand(req, forwardEvent);
       return { ok: true, result };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -157,28 +152,12 @@ app.whenReady().then(() => {
     return { path: filePath, name: path.basename(filePath) };
   });
 
-  ipcMain.handle('ollama:start', async () => {
-    try {
-      const res = await startOllama(USER_OLLAMA_APP);
-      return { ok: true, ...res };
-    } catch (err) {
-      return { ok: false, error: (err as Error).message };
-    }
-  });
-
-  ipcMain.handle('ollama:ensureModel', async () => {
-    try {
-      if (await isModelInstalled(MODEL_NAME)) return { ok: true, alreadyInstalled: true };
-      await ensureModel(MODEL_NAME, emitProgress);
-      return { ok: true, alreadyInstalled: false };
-    } catch (err) {
-      const message = (err as Error).message;
-      emitProgress({ stage: 'error', message });
-      return { ok: false, error: message };
-    }
-  });
-
   createWindow();
+
+  // Eager download: kick off the model fetch as soon as the window is up.
+  // The renderer subscribes to 'gliner:progress' to render the progress UI.
+  // If the model is already cached this resolves almost immediately.
+  void startGlinerDownload();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -186,7 +165,10 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  scrubberService.shutdown();
+  // On macOS, closing the last window keeps the app alive in the dock —
+  // don't tear down the python serve loop, since reopening the window
+  // would force a multi-second ONNX/PaddleOCR cold start. Other platforms
+  // quit the app, which fires before-quit and shuts the scrubber down there.
   if (process.platform !== 'darwin') app.quit();
 });
 

@@ -67,6 +67,15 @@ const ICONS = {
   refresh: 'M23 4v6h-6 M1 20v-6h6 M3.51 9a9 9 0 0 1 14.85-3.36L23 10 M20.49 15a9 9 0 0 1-14.85 3.36L1 14',
 };
 
+const HIGHLIGHT_COLORS = {
+  red: { base: '#DC2626', label: 'Red' },
+  yellow: { base: '#EAB308', label: 'Yellow' },
+  green: { base: '#16A34A', label: 'Green' },
+  blue: { base: '#2563EB', label: 'Blue' },
+  black: { base: '#000000', label: 'Black' },
+} as const;
+type HighlightColor = keyof typeof HIGHLIGHT_COLORS;
+
 export function MainScreen(): JSX.Element {
   const [appState, setAppState] = useState<AppState>('empty');
   const [selectedFile, setSelectedFile] = useState<string>('');
@@ -77,6 +86,8 @@ export function MainScreen(): JSX.Element {
   const [scrubbedPath, setScrubbedPath] = useState<string>('');
   const [pages, setPages] = useState<Map<number, PageInfo>>(new Map());
   const [hoveredValue, setHoveredValue] = useState<string | null>(null);
+  const [highlightColor, setHighlightColor] = useState<HighlightColor>('red');
+  const [colorPickerOpen, setColorPickerOpen] = useState(false);
 
   const handleFileSelect = async (): Promise<void> => {
     const picked = await window.dialogApi.openPdf();
@@ -165,7 +176,7 @@ export function MainScreen(): JSX.Element {
     if (selected.length === 0) return;
     setIsScrubbing(true);
     try {
-      const res = await window.scrubber.scrub(selected);
+      const res = await window.scrubber.scrub(selected, HIGHLIGHT_COLORS[highlightColor].base);
       if (res.ok) {
         const output = (res.result.output as string) ?? '';
         setScrubbedPath(output);
@@ -260,170 +271,118 @@ export function MainScreen(): JSX.Element {
       </div>
       */}
 
-      <div className="size-full flex flex-col p-8">
-        <div className="mb-8 animate-in fade-in slide-in-from-top-4 duration-500">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="w-12 h-12 bg-primary/10 border-2 border-primary rounded-lg flex items-center justify-center">
-              <Icon path={ICONS.shield} className="w-7 h-7 text-primary" />
-            </div>
-            <div>
-              <h1 className="tracking-tight text-2xl font-semibold">PII Scrubber</h1>
-              <p className="text-sm text-muted-foreground">
-                Sensitive Data Detection & Removal
-              </p>
-            </div>
+      <div className="size-full flex flex-col p-6">
+        <div className="mb-4 flex items-center gap-2">
+          <div className="w-7 h-7 bg-primary/10 border border-primary rounded-md flex items-center justify-center">
+            <Icon path={ICONS.shield} className="w-4 h-4 text-primary" />
           </div>
-          <div className="h-px bg-gradient-to-r from-primary via-primary/30 to-transparent mt-4" />
+          <h1 className="tracking-tight text-base font-semibold">PII Scrubber</h1>
         </div>
 
         <div className="flex-1 min-h-0 flex gap-6">
-          {/* Left Panel */}
-          <div className="w-72 bg-card border border-border rounded-xl shadow-sm p-4 flex flex-col gap-4">
-            <div>
-              <label className="text-sm mb-3 block text-primary font-medium">
-                {selectedFile ? 'Selected PDF File' : 'Select PDF File'}
-              </label>
-              {!selectedFile ? (
+          {/* Left column: file controls + detection results */}
+          <div className="w-[420px] flex-shrink-0 bg-card border border-border rounded-xl shadow-sm p-5 flex flex-col">
+            {/* File picker */}
+            {!selectedFile ? (
+              <button
+                onClick={handleFileSelect}
+                className="w-full px-3 py-4 bg-secondary border-2 border-dashed border-border rounded-lg hover:border-primary hover:bg-primary/5 transition-all flex flex-col items-center justify-center gap-2 group"
+              >
+                <Icon
+                  path={ICONS.fileUp}
+                  className="w-7 h-7 text-muted-foreground group-hover:text-primary transition-colors"
+                />
+                <span className="text-sm text-muted-foreground group-hover:text-foreground transition-colors">
+                  Click to browse for a PDF
+                </span>
+              </button>
+            ) : (
+              <div className="p-2.5 bg-primary/5 border border-primary/20 rounded-lg flex items-center gap-2">
+                <Icon path={ICONS.file} className="w-5 h-5 text-primary flex-shrink-0" />
+                <button
+                  onClick={() => {
+                    if (selectedFilePath) window.dialogApi.openPath(selectedFilePath);
+                  }}
+                  className="flex-1 min-w-0 text-sm text-primary hover:underline truncate text-left cursor-pointer"
+                  title={selectedFile}
+                >
+                  {selectedFile}
+                </button>
                 <button
                   onClick={handleFileSelect}
-                  className="w-full px-3 py-5 bg-secondary border-2 border-dashed border-border rounded-lg hover:border-primary hover:bg-primary/5 transition-all flex flex-col items-center justify-center gap-2 group"
+                  aria-label="Change file"
+                  title="Change file"
+                  className="p-1 rounded-md text-primary hover:bg-primary/10 transition-colors cursor-pointer flex-shrink-0"
                 >
-                  <Icon
-                    path={ICONS.fileUp}
-                    className="w-9 h-9 text-muted-foreground group-hover:text-primary transition-colors"
-                  />
-                  <span className="text-sm text-muted-foreground group-hover:text-foreground transition-colors">
-                    Click to browse
-                  </span>
+                  <Icon path={ICONS.edit} className="w-4 h-4" />
                 </button>
-              ) : (
-                <div className="p-3 bg-primary/5 border border-primary/20 rounded-lg flex items-center gap-3">
-                  <Icon path={ICONS.file} className="w-6 h-6 text-primary flex-shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <button
-                      onClick={() => {
-                        if (selectedFilePath) window.dialogApi.openPath(selectedFilePath);
-                      }}
-                      className="text-sm text-primary hover:underline truncate block w-full text-left cursor-pointer"
-                      title={selectedFile}
-                    >
-                      {selectedFile}
-                    </button>
-                  </div>
-                  <button
-                    onClick={handleFileSelect}
-                    aria-label="Change file"
-                    title="Change file"
-                    className="p-1.5 rounded-md text-primary hover:bg-primary/10 hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary/40 transition-colors cursor-pointer flex-shrink-0"
-                  >
-                    <Icon path={ICONS.edit} className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => setSelectedFile('')}
-                    aria-label="Clear file"
-                    title="Clear file"
-                    className="p-1.5 rounded-md text-primary hover:bg-primary/10 hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary/40 transition-colors cursor-pointer flex-shrink-0"
-                  >
-                    <Icon path={ICONS.x} className="w-4 h-4" />
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {selectedFile && appState === 'empty' && (
-              <div>
-                <label className="text-sm mb-3 block text-primary font-medium">Detect PII</label>
                 <button
-                  onClick={handleDetect}
-                  disabled={isScanning}
-                  className="w-full px-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                  onClick={() => setSelectedFile('')}
+                  aria-label="Clear file"
+                  title="Clear file"
+                  className="p-1 rounded-md text-primary hover:bg-primary/10 transition-colors cursor-pointer flex-shrink-0"
                 >
-                  <Icon path={ICONS.scan} className="w-4 h-4" />
-                  <span className="font-medium">
-                    {isScanning ? 'Scanning...' : 'Run Detection'}
-                  </span>
+                  <Icon path={ICONS.x} className="w-4 h-4" />
                 </button>
               </div>
+            )}
+
+            {/* Primary action button */}
+            {selectedFile && appState === 'empty' && (
+              <button
+                onClick={handleDetect}
+                disabled={isScanning}
+                className="mt-3 w-full px-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                <Icon path={ICONS.scan} className="w-4 h-4" />
+                <span className="font-medium">
+                  {isScanning ? 'Scanning...' : 'Run Detection'}
+                </span>
+              </button>
             )}
 
             {appState === 'detected' && (
-              <div>
-                <label className="text-sm mb-3 block text-primary font-medium">
-                  Scrub Document
-                </label>
-                <button
-                  onClick={handleScrub}
-                  disabled={isScrubbing || piiItems.filter((p) => p.checked).length === 0}
-                  className="w-full px-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2 relative overflow-hidden group"
-                >
-                  <Icon path={ICONS.alertTriangle} className="w-4 h-4" />
-                  <span className="font-medium">
-                    {isScrubbing ? 'Scrubbing...' : 'Execute Scrub'}
-                  </span>
-                </button>
-                <p className="text-xs text-muted-foreground mt-2 text-center">
-                  This will create a new sanitized file
-                </p>
-              </div>
+              <button
+                onClick={handleScrub}
+                disabled={isScrubbing || piiItems.filter((p) => p.checked).length === 0}
+                className="mt-3 w-full px-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                <Icon path={ICONS.alertTriangle} className="w-4 h-4" />
+                <span className="font-medium">
+                  {isScrubbing ? 'Scrubbing...' : 'Execute Scrub'}
+                </span>
+              </button>
             )}
 
             {appState === 'scrubbed' && (
-              <>
-                <div className="bg-primary/5 border border-primary/20 rounded-xl p-3 flex flex-col gap-3">
-                  <div className="flex flex-col items-center gap-3 pt-2">
-                    <Icon path={ICONS.checkCircle} className="w-14 h-14 text-primary" />
-                    <h3 className="font-semibold text-lg">Scrub Complete</h3>
+              <div className="mt-3 flex flex-col gap-2">
+                <div className="bg-primary/5 border border-primary/20 rounded-lg p-3 flex items-center gap-3">
+                  <Icon path={ICONS.checkCircle} className="w-6 h-6 text-primary flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium">Scrub complete</p>
+                    <button
+                      onClick={handleOpenScrubbed}
+                      className="text-xs text-primary hover:underline truncate block w-full text-left cursor-pointer"
+                      title={scrubbedPath}
+                    >
+                      {scrubbedPath ? scrubbedPath.split('/').pop() : ''}
+                    </button>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <Icon path={ICONS.file} className="w-6 h-6 text-primary flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <button
-                        onClick={handleOpenScrubbed}
-                        className="text-sm text-primary hover:underline truncate block w-full text-left cursor-pointer"
-                        title={scrubbedPath}
-                      >
-                        {scrubbedPath ? scrubbedPath.split('/').pop() : ''}
-                      </button>
-                    </div>
-                  </div>
-                  {/*
-                  <button
-                    onClick={handleOpenScrubbed}
-                    className="px-4 py-2 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all flex items-center justify-center gap-2 mx-auto"
-                  >
-                    <Icon path={ICONS.download} className="w-4 h-4" />
-                    <span className="text-sm font-medium">Open File</span>
-                  </button>
-                  */}
                 </div>
                 <button
                   onClick={handleReset}
-                  className="w-full px-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all flex items-center justify-center gap-2"
+                  className="w-full px-4 py-2 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all flex items-center justify-center gap-2"
                 >
                   <Icon path={ICONS.refresh} className="w-4 h-4" />
-                  <span className="font-medium">Start Over</span>
+                  <span className="text-sm font-medium">Start Over</span>
                 </button>
-              </>
+              </div>
             )}
 
-            <div className="mt-auto pt-4 border-t border-border">
-              <div className="flex items-start gap-2 text-xs text-muted-foreground">
-                <Icon
-                  path={ICONS.alertTriangle}
-                  className="w-4 h-4 text-primary mt-0.5 flex-shrink-0"
-                />
-                <p>
-                  This tool removes personally identifiable information from PDF documents. Always
-                  review the output before distribution.
-                </p>
-              </div>
-            </div>
-          </div>
+            <div className="h-px bg-border my-4" />
 
-          {/* Right Panel */}
-          <div className="flex-1 min-h-0 bg-card border border-border rounded-xl shadow-sm p-6 flex flex-col">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="font-semibold text-lg">Detection Results</h2>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="font-semibold text-base">Detection Results</h2>
               {(piiItems.length > 0 || isScanning) && (
                 <div className="flex items-center gap-2">
                   <div className="w-2 h-2 bg-primary rounded-full animate-pulse" />
@@ -433,16 +392,12 @@ export function MainScreen(): JSX.Element {
                 </div>
               )}
             </div>
-            <div className="h-px bg-gradient-to-r from-primary/30 via-primary/10 to-transparent mb-6" />
 
             {piiItems.length === 0 && !isScanning && (
-              <div className="flex-1 flex flex-col items-center justify-center text-center">
-                <div className="w-32 h-32 border-2 border-dashed border-border rounded-xl flex items-center justify-center mb-6 bg-secondary/50">
-                  <Icon path={ICONS.scan} className="w-16 h-16 text-muted-foreground/40" />
-                </div>
-                <p className="text-foreground/70 mb-2 font-medium">No scan results available</p>
+              <div className="flex-1 flex flex-col items-center justify-center text-center py-8">
+                <Icon path={ICONS.scan} className="w-12 h-12 text-muted-foreground/40 mb-3" />
                 <p className="text-sm text-muted-foreground">
-                  Select a PDF file and run detection to begin
+                  {selectedFile ? 'Run detection to begin' : 'Select a PDF file to begin'}
                 </p>
               </div>
             )}
@@ -541,10 +496,56 @@ export function MainScreen(): JSX.Element {
 
           </div>
 
-          {/* Right Panel: PDF preview with bbox overlays (temporary debug view) */}
-          <div className="flex-1 min-h-0 bg-card border border-border rounded-xl shadow-sm p-4 flex flex-col">
+          {/* Right column: PDF preview with bbox overlays */}
+          <div className="flex-1 min-w-0 min-h-0 bg-card border border-border rounded-xl shadow-sm p-5 flex flex-col">
             <div className="flex items-center justify-between mb-3">
-              <h2 className="font-semibold text-lg">Preview</h2>
+              <div className="flex items-center gap-2">
+                <h2 className="font-semibold text-base">Preview</h2>
+                <div className="relative">
+                  <button
+                    onClick={() => setColorPickerOpen((v) => !v)}
+                    onBlur={() => setTimeout(() => setColorPickerOpen(false), 150)}
+                    aria-label="Highlight color"
+                    title="Highlight color"
+                    className="w-6 h-6 rounded-md border border-border hover:border-foreground/40 transition-colors flex items-center justify-center"
+                  >
+                    <span
+                      className="w-4 h-4 rounded-sm border"
+                      style={{
+                        backgroundColor: HIGHLIGHT_COLORS[highlightColor].base + '66',
+                        borderColor: HIGHLIGHT_COLORS[highlightColor].base,
+                      }}
+                    />
+                  </button>
+                  {colorPickerOpen && (
+                    <div className="absolute left-0 top-full mt-1 z-10 bg-card border border-border rounded-lg shadow-md p-2 flex gap-1.5">
+                      {(Object.keys(HIGHLIGHT_COLORS) as HighlightColor[]).map((key) => {
+                        const c = HIGHLIGHT_COLORS[key];
+                        const selected = key === highlightColor;
+                        return (
+                          <button
+                            key={key}
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              setHighlightColor(key);
+                              setColorPickerOpen(false);
+                            }}
+                            aria-label={c.label}
+                            title={c.label}
+                            className={`w-6 h-6 rounded-md border-2 transition-transform hover:scale-110 ${
+                              selected ? '' : 'border-transparent'
+                            }`}
+                            style={{
+                              backgroundColor: c.base + '66',
+                              borderColor: selected ? c.base : 'transparent',
+                            }}
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
               {previewPanel && (
                 <span className="text-xs text-muted-foreground">
                   Page {previewPanel.pageNum} / {pages.size}
@@ -554,11 +555,10 @@ export function MainScreen(): JSX.Element {
                 </span>
               )}
             </div>
-            <div className="h-px bg-gradient-to-r from-primary/30 via-primary/10 to-transparent mb-4" />
 
-            <div className="flex-1 min-h-0 overflow-auto">
+            <div className="flex-1 min-h-0 flex items-center justify-center">
               {!previewPanel && (
-                <div className="h-full flex flex-col items-center justify-center text-center text-sm text-muted-foreground">
+                <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground">
                   <Icon path={ICONS.file} className="w-12 h-12 text-muted-foreground/40 mb-3" />
                   <p>Run detection to preview pages.</p>
                   <p className="mt-1">Hover a PII entry to highlight its location.</p>
@@ -566,10 +566,9 @@ export function MainScreen(): JSX.Element {
               )}
               {previewPanel && (
                 <div
-                  className="relative bg-secondary border border-border rounded mx-auto"
+                  className="relative bg-secondary border border-border rounded h-full max-w-full"
                   style={{
                     aspectRatio: `${previewPanel.page.image_width} / ${previewPanel.page.image_height}`,
-                    width: '100%',
                   }}
                 >
                   <img
@@ -578,22 +577,27 @@ export function MainScreen(): JSX.Element {
                     className="absolute inset-0 w-full h-full object-contain select-none"
                     draggable={false}
                   />
-                  {previewPanel.overlays.map((o, i) => (
-                    <div
-                      key={i}
-                      className={`absolute rounded-sm pointer-events-none transition-colors ${
-                        o.isHovered
-                          ? 'border-2 border-primary bg-primary/40'
-                          : 'border border-primary/60 bg-primary/20'
-                      }`}
-                      style={{
-                        left: `${(o.bbox.x / previewPanel.page.image_width) * 100}%`,
-                        top: `${(o.bbox.y / previewPanel.page.image_height) * 100}%`,
-                        width: `${(o.bbox.w / previewPanel.page.image_width) * 100}%`,
-                        height: `${(o.bbox.h / previewPanel.page.image_height) * 100}%`,
-                      }}
-                    />
-                  ))}
+                  {previewPanel.overlays.map((o, i) => {
+                    const base = HIGHLIGHT_COLORS[highlightColor].base;
+                    const anyHover = hoveredValue != null;
+                    const dimmed = anyHover && !o.isHovered;
+                    return (
+                      <div
+                        key={i}
+                        className="absolute rounded-sm pointer-events-none transition-all"
+                        style={{
+                          left: `${(o.bbox.x / previewPanel.page.image_width) * 100}%`,
+                          top: `${(o.bbox.y / previewPanel.page.image_height) * 100}%`,
+                          width: `${(o.bbox.w / previewPanel.page.image_width) * 100}%`,
+                          height: `${(o.bbox.h / previewPanel.page.image_height) * 100}%`,
+                          borderStyle: 'solid',
+                          borderWidth: o.isHovered ? 2 : 1,
+                          borderColor: dimmed ? 'transparent' : base,
+                          backgroundColor: base + (o.isHovered ? '66' : dimmed ? '26' : '33'),
+                        }}
+                      />
+                    );
+                  })}
                 </div>
               )}
             </div>

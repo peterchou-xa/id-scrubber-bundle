@@ -1,6 +1,6 @@
 import { MainScreen } from './MainScreen';
 import { StatusCard } from './StatusCard';
-import { useOllamaSetup } from './useOllamaSetup';
+import { useGlinerSetup } from './useGlinerSetup';
 
 function ShieldIcon({ className }: { className?: string }): JSX.Element {
   return (
@@ -19,7 +19,7 @@ function ShieldIcon({ className }: { className?: string }): JSX.Element {
 }
 
 export function App(): JSX.Element {
-  const { state, install, retry } = useOllamaSetup();
+  const { state, retry } = useGlinerSetup();
 
   if (state.stage === 'done') {
     return <MainScreen />;
@@ -48,7 +48,7 @@ export function App(): JSX.Element {
           </div>
           <div className="h-px bg-gradient-to-r from-primary via-primary/30 to-transparent mt-4" />
         </header>
-        <StatusCard state={state} onInstall={install} onRetry={retry} />
+        <StatusCard state={state} onRetry={retry} />
       </main>
     </div>
   );

@@ -1,56 +1,47 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
-export type OllamaStatus = {
-  installed: boolean;
-  location: string | null;
-  running: boolean;
-  modelReady: boolean;
-  model: string;
+export type GlinerStatus = {
+  cached: boolean;
+  dir: string;
+  repo: string;
 };
 
-export type OllamaInstallResult =
-  | { ok: true; location: string; reinstalled: boolean }
+export type GlinerDownloadResult =
+  | { ok: true; dir: string }
   | { ok: false; error: string };
 
-export type OllamaStartResult =
-  | { ok: true; alreadyRunning: boolean }
-  | { ok: false; error: string };
-
-export type OllamaEnsureModelResult =
-  | { ok: true; alreadyInstalled: boolean }
-  | { ok: false; error: string };
-
-export type ProgressPayload =
-  | { stage: 'downloading'; percent: number; received?: number; total?: number }
-  | { stage: 'installing'; step: 'mount' | 'copy' | 'quarantine' }
-  | { stage: 'starting'; location?: string }
+export type GlinerProgress =
+  | { stage: 'checking' }
+  | { stage: 'cached' }
+  | { stage: 'starting'; totalBytes?: number }
   | {
-      stage: 'pulling';
-      model: string;
+      stage: 'downloading';
+      file: string;
+      fileIndex: number;
+      fileCount: number;
+      received: number;
+      total: number;
+      overallReceived: number;
+      overallTotal: number;
       percent: number;
-      received?: number;
-      total?: number;
-      status?: string;
     }
-  | { stage: 'done'; location: string }
+  | { stage: 'done'; dir: string }
   | { stage: 'error'; message: string };
 
-const ollamaApi = {
-  getStatus: (): Promise<OllamaStatus> => ipcRenderer.invoke('ollama:status'),
-  install: (): Promise<OllamaInstallResult> => ipcRenderer.invoke('ollama:install'),
-  start: (): Promise<OllamaStartResult> => ipcRenderer.invoke('ollama:start'),
-  ensureModel: (): Promise<OllamaEnsureModelResult> => ipcRenderer.invoke('ollama:ensureModel'),
-  onProgress: (callback: (payload: ProgressPayload) => void): (() => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, payload: ProgressPayload): void =>
+const glinerApi = {
+  getStatus: (): Promise<GlinerStatus> => ipcRenderer.invoke('gliner:status'),
+  download: (): Promise<GlinerDownloadResult> => ipcRenderer.invoke('gliner:download'),
+  onProgress: (callback: (payload: GlinerProgress) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: GlinerProgress): void =>
       callback(payload);
-    ipcRenderer.on('ollama:progress', listener);
-    return () => ipcRenderer.removeListener('ollama:progress', listener);
+    ipcRenderer.on('gliner:progress', listener);
+    return () => ipcRenderer.removeListener('gliner:progress', listener);
   },
 };
 
-export type OllamaApi = typeof ollamaApi;
+export type GlinerApi = typeof glinerApi;
 
-contextBridge.exposeInMainWorld('ollama', ollamaApi);
+contextBridge.exposeInMainWorld('gliner', glinerApi);
 
 export type ServeEvent = Record<string, unknown> & { event: string; cmd?: string };
 
@@ -61,8 +52,8 @@ export type ScrubberCmdResult =
 const scrubberApi = {
   detect: (pdfPath: string): Promise<ScrubberCmdResult> =>
     ipcRenderer.invoke('scrubber:detect', pdfPath),
-  scrub: (selected: string[]): Promise<ScrubberCmdResult> =>
-    ipcRenderer.invoke('scrubber:scrub', selected),
+  scrub: (selected: string[], color?: string): Promise<ScrubberCmdResult> =>
+    ipcRenderer.invoke('scrubber:scrub', selected, color),
   onEvent: (callback: (evt: ServeEvent) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, evt: ServeEvent): void => callback(evt);
     ipcRenderer.on('scrubber:event', listener);

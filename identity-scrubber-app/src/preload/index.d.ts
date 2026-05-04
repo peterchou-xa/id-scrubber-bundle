@@ -1,8 +1,8 @@
-import type { OllamaApi, ScrubberApi, DialogApi } from './index';
+import type { GlinerApi, ScrubberApi, DialogApi } from './index';
 
 declare global {
   interface Window {
-    ollama: OllamaApi;
+    gliner: GlinerApi;
     scrubber: ScrubberApi;
     dialogApi: DialogApi;
   }

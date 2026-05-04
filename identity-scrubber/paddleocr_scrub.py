@@ -532,8 +532,12 @@ def render_redacted_pages(
     pdf_path: str,
     page_pii_bboxes: dict[int, list[tuple[float, float, float, float]]],
     dpi: int = DEFAULT_DPI,
+    fill_color: str = "#000000",
 ) -> list:
-    """Render each page and draw black rectangles over PII regions."""
+    """Render each page and draw filled rectangles over PII regions.
+
+    fill_color is any string accepted by PIL.ImageDraw, e.g. a "#RRGGBB" hex.
+    """
     from PIL import Image
 
     pdf = pdfium.PdfDocument(pdf_path)
@@ -555,7 +559,7 @@ def render_redacted_pages(
                 px_x1 = x1 * scale
                 px_y0 = img_h - y1 * scale
                 px_y1 = img_h - y0 * scale
-                draw.rectangle([px_x0, px_y0, px_x1, px_y1], fill="black")
+                draw.rectangle([px_x0, px_y0, px_x1, px_y1], fill=fill_color)
 
         results.append((page_num, img.convert("RGB")))
 
@@ -568,9 +572,10 @@ def scrub_with_ocr(
     page_pii_bboxes: dict[int, list[tuple[float, float, float, float]]],
     output_path: str,
     dpi: int = DEFAULT_DPI,
+    fill_color: str = "#000000",
 ) -> None:
     """Redact PDF by drawing on rasterized page images, then save as PDF."""
-    pages = render_redacted_pages(pdf_path, page_pii_bboxes, dpi=dpi)
+    pages = render_redacted_pages(pdf_path, page_pii_bboxes, dpi=dpi, fill_color=fill_color)
     if not pages:
         return
     images = [img for _, img in pages]

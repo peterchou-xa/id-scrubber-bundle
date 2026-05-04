@@ -1,10 +1,10 @@
 /// <reference types="vite/client" />
 
-import type { OllamaApi, ScrubberApi, DialogApi } from '../../preload/index';
+import type { GlinerApi, ScrubberApi, DialogApi } from '../../preload/index';
 
 declare global {
   interface Window {
-    ollama: OllamaApi;
+    gliner: GlinerApi;
     scrubber: ScrubberApi;
     dialogApi: DialogApi;
   }
