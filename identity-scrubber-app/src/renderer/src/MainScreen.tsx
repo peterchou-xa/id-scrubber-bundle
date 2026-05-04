@@ -194,22 +194,25 @@ export function MainScreen(): JSX.Element {
     setHoveredValue(null);
   };
 
-  // Pick the page to display + bboxes to overlay based on what's hovered.
-  // For now just pick the page of the first bbox of the hovered PII; if
-  // nothing's hovered, fall back to page 1 with no overlays.
+  // Show all checked PII bboxes on the current preview page as translucent
+  // highlights. Hovering a PII entry jumps to its page (if different) and
+  // emphasizes its boxes.
   const previewPanel = useMemo(() => {
     const hovered = hoveredValue
       ? piiItems.find((p) => p.value === hoveredValue)
       : null;
-    const targetBbox = hovered?.bboxes[0];
-    const pageNum = targetBbox?.page_num ?? (pages.size > 0 ? Math.min(...pages.keys()) : null);
-    console.log('[previewPanel] hoveredValue=', hoveredValue, 'hovered=', hovered, 'pages.size=', pages.size, 'pageNum=', pageNum);
+    const hoveredPage = hovered?.bboxes[0]?.page_num;
+    const pageNum = hoveredPage ?? (pages.size > 0 ? Math.min(...pages.keys()) : null);
     if (pageNum == null) return null;
     const page = pages.get(pageNum);
     if (!page) return null;
-    const overlays = (hovered?.bboxes ?? []).filter((b) => b.page_num === pageNum);
-    const url = imgUrl(page.image_path);
-    console.log('[previewPanel] page=', page, 'overlays=', overlays, 'url=', url);
+    const overlays = piiItems.flatMap((p) =>
+      p.checked
+        ? p.bboxes
+            .filter((b) => b.page_num === pageNum)
+            .map((b) => ({ bbox: b, value: p.value, isHovered: p.value === hoveredValue }))
+        : [],
+    );
     return { page, pageNum, overlays };
   }, [hoveredValue, piiItems, pages]);
 
@@ -237,7 +240,7 @@ export function MainScreen(): JSX.Element {
           onClick={() => {
             setSelectedFile('confidential_document.pdf');
             setPiiItems([
-              { type: 'full_name', value: 'Peter Chou', count: 1, checked: true },
+              { type: 'name', value: 'Peter Chou', count: 1, checked: true },
             ]);
             setAppState('detected');
           }}
@@ -545,7 +548,9 @@ export function MainScreen(): JSX.Element {
               {previewPanel && (
                 <span className="text-xs text-muted-foreground">
                   Page {previewPanel.pageNum} / {pages.size}
-                  {hoveredValue ? ` · ${previewPanel.overlays.length} match(es)` : ''}
+                  {hoveredValue
+                    ? ` · ${previewPanel.overlays.filter((o) => o.isHovered).length} match(es)`
+                    : ` · ${previewPanel.overlays.length} highlight(s)`}
                 </span>
               )}
             </div>
@@ -573,15 +578,19 @@ export function MainScreen(): JSX.Element {
                     className="absolute inset-0 w-full h-full object-contain select-none"
                     draggable={false}
                   />
-                  {previewPanel.overlays.map((b, i) => (
+                  {previewPanel.overlays.map((o, i) => (
                     <div
                       key={i}
-                      className="absolute border-2 border-primary bg-primary/20 rounded-sm pointer-events-none"
+                      className={`absolute rounded-sm pointer-events-none transition-colors ${
+                        o.isHovered
+                          ? 'border-2 border-primary bg-primary/40'
+                          : 'border border-primary/60 bg-primary/20'
+                      }`}
                       style={{
-                        left: `${(b.x / previewPanel.page.image_width) * 100}%`,
-                        top: `${(b.y / previewPanel.page.image_height) * 100}%`,
-                        width: `${(b.w / previewPanel.page.image_width) * 100}%`,
-                        height: `${(b.h / previewPanel.page.image_height) * 100}%`,
+                        left: `${(o.bbox.x / previewPanel.page.image_width) * 100}%`,
+                        top: `${(o.bbox.y / previewPanel.page.image_height) * 100}%`,
+                        width: `${(o.bbox.w / previewPanel.page.image_width) * 100}%`,
+                        height: `${(o.bbox.h / previewPanel.page.image_height) * 100}%`,
                       }}
                     />
                   ))}
