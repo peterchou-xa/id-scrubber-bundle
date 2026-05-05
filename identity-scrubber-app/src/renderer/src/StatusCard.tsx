@@ -12,6 +12,9 @@ function formatBytes(bytes?: number): string {
 }
 
 export function StatusCard({ state, onRetry }: Props): JSX.Element {
+  if (state.stage === 'idle') {
+    return <IdleCard onRetry={onRetry} />;
+  }
   return (
     <section className="bg-card border border-border rounded-xl shadow-sm p-6 flex flex-col gap-4">
       <StatusText state={state} />
@@ -22,16 +25,42 @@ export function StatusCard({ state, onRetry }: Props): JSX.Element {
   );
 }
 
+function IdleCard({ onRetry }: { onRetry: () => void }): JSX.Element {
+  return (
+    <section className="bg-card border border-border rounded-xl shadow-sm p-8 flex flex-col items-center text-center gap-5">
+      <div>
+        <h2 className="text-xl font-semibold tracking-tight m-0">
+          Your documents stay on your device.
+        </h2>
+        <p className="text-sm text-muted-foreground mt-2 mb-0 max-w-md mx-auto leading-relaxed">
+          To make that possible, we need to download the detection files first.
+        </p>
+      </div>
+      <div className="text-xs text-muted-foreground tracking-wide uppercase">
+        One-time download · ~850 MB
+      </div>
+      <button
+        onClick={onRetry}
+        className="px-6 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground text-sm font-medium rounded-lg transition-colors shadow-sm"
+      >
+        Download &amp; set up
+      </button>
+    </section>
+  );
+}
+
 function StatusText({ state }: { state: SetupState }): JSX.Element {
   const isError = state.stage === 'error';
   const text = ((): string => {
     switch (state.stage) {
       case 'checking':
-        return 'Checking for PII model…';
+        return 'Getting ready to scrub…';
+      case 'idle':
+        return '';
       case 'downloading':
-        return 'Downloading PII model…';
+        return 'Downloading required files…';
       case 'done':
-        return 'PII model is ready';
+        return 'Ready to scrub';
       case 'error':
         return 'Setup failed';
     }
@@ -50,8 +79,8 @@ function StatusProgress({ state }: { state: SetupState }): JSX.Element | null {
   const received = formatBytes(state.received);
   const total = formatBytes(state.total);
   const sublabel =
-    state.fileCount && state.fileCount > 1 && state.file
-      ? `${state.file} (${state.fileIndex}/${state.fileCount})`
+    state.fileCount && state.fileCount > 1
+      ? `Required file (${state.fileIndex}/${state.fileCount})`
       : '';
   const bytesLabel = total ? `${received} / ${total} (${percent}%)` : received;
   const label = sublabel ? `${sublabel} · ${bytesLabel}` : bytesLabel;
@@ -62,7 +91,7 @@ function StatusHint({ state }: { state: SetupState }): JSX.Element | null {
   const hint = ((): string | null => {
     switch (state.stage) {
       case 'downloading':
-        return 'One-time download (~850 MB). Cached locally for future launches.';
+        return 'Cached locally for future launches.';
       case 'done':
         return state.dir ? `Cached at ${state.dir}` : null;
       case 'error':

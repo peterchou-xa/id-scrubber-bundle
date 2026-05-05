@@ -10,7 +10,18 @@ import {
   GlinerProgress,
 } from './gliner';
 
-export type ServeEvent = Record<string, unknown> & { event: string; cmd?: string };
+export type ServeEvent = Record<string, unknown> & {
+  cmd?: string;
+  phase?: string;
+  status?: string;
+  kind?: string;
+};
+
+// The phase whose status:"done" event marks the *end* of each cmd.
+const TERMINAL_PHASE: Record<string, string> = {
+  detect: 'analyze',
+  scrub: 'redact',
+};
 
 export const GLINER_MODEL_NAME = 'nvidia/gliner-pii';
 
@@ -84,7 +95,7 @@ class ScrubberService extends EventEmitter {
         };
 
         const onReady = (evt: ServeEvent): void => {
-          if (evt.event === 'ready') {
+          if (evt.status === 'ready' && !evt.cmd) {
             this.off('event', onReady);
             console.log('[scrubber] ready');
             finish(resolve);
@@ -159,15 +170,16 @@ class ScrubberService extends EventEmitter {
     await this.ensureStarted();
     return new Promise((resolve, reject) => {
       const targetCmd = req.cmd as string;
+      const terminalPhase = TERMINAL_PHASE[targetCmd];
       const listener = (evt: ServeEvent): void => {
         if (evt.cmd && evt.cmd !== targetCmd) return;
         onEvent(evt);
-        if (evt.event === 'done') {
-          this.off('event', listener);
-          resolve(evt);
-        } else if (evt.event === 'error') {
+        if (evt.status === 'error') {
           this.off('event', listener);
           reject(new Error(String(evt.message ?? 'scrubber error')));
+        } else if (evt.status === 'done' && evt.phase === terminalPhase) {
+          this.off('event', listener);
+          resolve(evt);
         }
       };
       this.on('event', listener);

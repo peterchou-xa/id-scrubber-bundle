@@ -24,6 +24,17 @@ interface PIIItem {
   bboxes: PiiBBox[];
 }
 
+type DetectStatus =
+  | { phase: 'ocr' }
+  | { phase: 'analyze'; chunk: number; total: number };
+
+function statusText(s: DetectStatus | null): string {
+  if (!s) return 'Analyzing document for PII…';
+  if (s.phase === 'ocr') return 'Reading text from the PDF…';
+  const pct = s.total > 0 ? Math.round((s.chunk / s.total) * 100) : 0;
+  return `Detecting PII (${pct}%)…`;
+}
+
 function imgUrl(absPath: string): string {
   // Fixed dummy host "local" so the URL parser doesn't consume the first
   // path segment as the authority (which would drop the leading '/var/').
@@ -88,10 +99,12 @@ export function MainScreen(): JSX.Element {
   const [hoveredValue, setHoveredValue] = useState<string | null>(null);
   const [highlightColor, setHighlightColor] = useState<HighlightColor>('red');
   const [colorPickerOpen, setColorPickerOpen] = useState(false);
+  const [detectStatus, setDetectStatus] = useState<DetectStatus | null>(null);
 
   const handleFileSelect = async (): Promise<void> => {
     const picked = await window.dialogApi.openPdf();
     if (picked) {
+      handleReset();
       setSelectedFile(picked.name);
       setSelectedFilePath(picked.path);
     }
@@ -101,7 +114,7 @@ export function MainScreen(): JSX.Element {
     const off = window.scrubber.onEvent((evt) => {
       console.log('[scrubber event]', evt);
       if (evt.cmd !== 'detect') return;
-      if (evt.event === 'page') {
+      if (evt.kind === 'page') {
         const pageNum = evt.page_num as number | undefined;
         const imagePath = evt.image_path as string | undefined;
         const imgW = evt.image_width as number | undefined;
@@ -112,7 +125,7 @@ export function MainScreen(): JSX.Element {
           next.set(pageNum, { image_path: imagePath, image_width: imgW, image_height: imgH });
           return next;
         });
-      } else if (evt.event === 'pii') {
+      } else if (evt.kind === 'pii') {
         const item = evt.item as { type: string; value: string } | undefined;
         if (!item) return;
         setPiiItems((prev) => {
@@ -124,7 +137,15 @@ export function MainScreen(): JSX.Element {
           }
           return [...prev, { type: item.type, value: item.value, count: 1, checked: true, bboxes: [] }];
         });
-      } else if (evt.event === 'done') {
+      } else if (evt.phase === 'ocr' && evt.status === 'started') {
+        setDetectStatus({ phase: 'ocr' });
+      } else if (evt.phase === 'analyze' && evt.status === 'in_progress') {
+        const chunk = evt.chunk as number | undefined;
+        const total = evt.total as number | undefined;
+        if (typeof chunk === 'number' && typeof total === 'number') {
+          setDetectStatus({ phase: 'analyze', chunk, total });
+        }
+      } else if (evt.phase === 'analyze' && evt.status === 'done') {
         const pii =
           (evt.pii as {
             type: string;
@@ -145,6 +166,7 @@ export function MainScreen(): JSX.Element {
           }),
         );
         setIsScanning(false);
+        setDetectStatus(null);
         setAppState('detected');
       }
     });
@@ -154,6 +176,7 @@ export function MainScreen(): JSX.Element {
   const handleDetect = (): void => {
     if (!selectedFilePath) return;
     setIsScanning(true);
+    setDetectStatus(null);
     setPiiItems([]);
     setPages(new Map());
     setHoveredValue(null);
@@ -161,6 +184,7 @@ export function MainScreen(): JSX.Element {
       if (!res.ok) {
         console.error('detect error:', res.error);
         setIsScanning(false);
+        setDetectStatus(null);
       }
     });
   };
@@ -317,7 +341,7 @@ export function MainScreen(): JSX.Element {
                   <Icon path={ICONS.edit} className="w-4 h-4" />
                 </button>
                 <button
-                  onClick={() => setSelectedFile('')}
+                  onClick={handleReset}
                   aria-label="Clear file"
                   title="Clear file"
                   className="p-1 rounded-md text-primary hover:bg-primary/10 transition-colors cursor-pointer flex-shrink-0"
@@ -383,14 +407,6 @@ export function MainScreen(): JSX.Element {
 
             <div className="flex items-center justify-between mb-3">
               <h2 className="font-semibold text-base">Detection Results</h2>
-              {(piiItems.length > 0 || isScanning) && (
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-primary rounded-full animate-pulse" />
-                  <span className="text-xs text-muted-foreground font-medium">
-                    {isScanning ? 'Scanning' : appState === 'scrubbed' ? 'Scrubbed' : 'Complete'}
-                  </span>
-                </div>
-              )}
             </div>
 
             {piiItems.length === 0 && !isScanning && (
@@ -477,7 +493,7 @@ export function MainScreen(): JSX.Element {
                     <div className="bg-secondary/50 border border-border border-dashed rounded-lg p-4 flex items-center gap-3">
                       <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
                       <span className="text-sm text-muted-foreground">
-                        Analyzing document for PII...
+                        {statusText(detectStatus)}
                       </span>
                     </div>
                   )}

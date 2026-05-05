@@ -238,28 +238,29 @@ def _run_ocr_scrub(args, input_pdf: str, output_pdf: str, *, do_scrub: bool) -> 
     scrub_done: dict = {}
 
     def cli_emit(obj: dict) -> None:
-        event = obj.get("event")
         cmd = obj.get("cmd")
-        if event == "error":
+        status = obj.get("status")
+        phase = obj.get("phase")
+        if status == "error":
             print(f"[{cmd}] ERROR: {obj.get('message')}", file=sys.stderr)
             failed["value"] = True
-        elif event == "progress":
-            stage = obj.get("stage")
-            if cmd == "detect" and stage == "ocr_done":
-                print(f"OCR complete: {obj['pages']} page(s).", file=sys.stderr)
-            elif cmd == "detect" and stage == "chunk":
-                print(f"  Chunk {obj['chunk']}/{obj['total']} processed.", file=sys.stderr)
-            elif cmd == "scrub" and stage == "matched":
-                print(
-                    f"Matched {obj['bboxes']} PII region(s) across {obj['pages']} page(s).",
-                    file=sys.stderr,
-                )
-        elif event == "done":
-            if cmd == "detect":
+            return
+        if cmd == "detect" and phase == "ocr" and status == "done":
+            print(f"OCR complete: {obj['pages']} page(s).", file=sys.stderr)
+        elif cmd == "detect" and phase == "analyze" and status == "in_progress":
+            print(f"  Chunk {obj['chunk']}/{obj['total']} starting.", file=sys.stderr)
+        elif cmd == "scrub" and phase == "redact" and status == "in_progress":
+            print(
+                f"Redacting {obj['bboxes']} PII region(s) across {obj['pages']} page(s).",
+                file=sys.stderr,
+            )
+        if status == "done":
+            if cmd == "detect" and phase == "analyze":
                 detect_done.update(obj)
-            elif cmd == "scrub":
+            elif cmd == "scrub" and phase == "redact":
                 scrub_done.update(obj)
-        # 'pii' events are silent on the CLI; full list is written via _write_json_output.
+        # kind:"pii" / kind:"page" events are silent on the CLI; full list is
+        # written via _write_json_output.
 
     detect_req = {
         "path": input_pdf,
@@ -385,14 +386,21 @@ def _detect_via_gliner_offsets(
     all_items: list[dict] = []
 
     for i, (chunk_offset, chunk) in enumerate(zip(chunk_offsets, chunk_texts), start=1):
+        emit({
+            "cmd": "detect",
+            "phase": "analyze",
+            "status": "in_progress",
+            "chunk": i,
+            "total": len(chunk_texts),
+        })
         try:
             entities = query_gliner_entities(chunk)
         except Exception as exc:
             tb = traceback.format_exc()
             print(tb, file=sys.stderr)
             emit({
-                "event": "error",
                 "cmd": "detect",
+                "status": "error",
                 "message": f"gliner failed on chunk {i}: {type(exc).__name__}: {exc!r}",
                 "traceback": tb,
             })
@@ -468,16 +476,8 @@ def _detect_via_gliner_offsets(
             px = _pdf_bbox_to_pixel(pdf_bbox, page_height_by_num[page_num], scale)
             bboxes_px_by_value.setdefault(r["value"], []).append({"page_num": page_num, **px})
 
-            emit({"event": "pii", "cmd": "detect", "item": item})
+            emit({"cmd": "detect", "kind": "pii", "item": item})
             all_items.append(item)
-
-        emit({
-            "event": "progress",
-            "cmd": "detect",
-            "stage": "chunk",
-            "chunk": i,
-            "total": len(chunk_texts),
-        })
 
     return all_items, False
 
@@ -485,7 +485,7 @@ def _detect_via_gliner_offsets(
 def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_emit) -> None:
     path = req.get("path")
     if not path:
-        emit({"event": "error", "cmd": "detect", "message": "missing 'path'"})
+        emit({"cmd": "detect", "status": "error", "message": "missing 'path'"})
         return
 
     opts = req.get("options") or {}
@@ -503,6 +503,7 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
     state["image_dir"] = image_dir
 
     print(f"[detect] OCR-ing {path} at {ocr_dpi} DPI (images → {image_dir})...", file=sys.stderr)
+    emit({"cmd": "detect", "phase": "ocr", "status": "started"})
     try:
         pages = ocr_scrub.ocr_pdf(
             path,
@@ -513,22 +514,22 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
         tb = traceback.format_exc()
         print(tb, file=sys.stderr)
         emit({
-            "event": "error",
             "cmd": "detect",
+            "status": "error",
             "message": f"ocr failed: {type(exc).__name__}: {exc!r}",
             "traceback": tb,
         })
         _cleanup_image_dir(state)
         return
 
-    emit({"event": "progress", "cmd": "detect", "stage": "ocr_done", "pages": len(pages)})
+    emit({"cmd": "detect", "phase": "ocr", "status": "done", "pages": len(pages)})
 
     # Tell the client about each rendered page so it can start displaying
     # them while the LLM chunks through the text.
     for p in pages:
         emit({
-            "event": "page",
             "cmd": "detect",
+            "kind": "page",
             "page_num": p.page_num,
             "image_path": p.image_path,
             "image_width": p.image_width,
@@ -537,8 +538,8 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
 
     if model != _GLINER_MODEL_NAME:
         emit({
-            "event": "error",
             "cmd": "detect",
+            "status": "error",
             "message": f"unsupported model {model!r}; only {_GLINER_MODEL_NAME!r} is supported",
         })
         return
@@ -600,8 +601,9 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
     state["bboxes_pdf_by_value"] = bboxes_pdf_by_value
 
     emit({
-        "event": "done",
         "cmd": "detect",
+        "phase": "analyze",
+        "status": "done",
         "total_pii": len(aggregated),
         "pii": aggregated,
     })
@@ -610,8 +612,8 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
 def _serve_scrub(req: dict, state: dict, defaults: argparse.Namespace | None = None, emit=_emit) -> None:
     if "bboxes_pdf_by_value" not in state:
         emit({
-            "event": "error",
             "cmd": "scrub",
+            "status": "error",
             "message": "no document loaded; run detect first",
         })
         return
@@ -619,15 +621,15 @@ def _serve_scrub(req: dict, state: dict, defaults: argparse.Namespace | None = N
     selected = req.get("selected")
     if not isinstance(selected, list):
         emit({
-            "event": "error",
             "cmd": "scrub",
+            "status": "error",
             "message": "missing 'selected' (list of PII values)",
         })
         return
 
     values = [v.strip() for v in selected if isinstance(v, str) and v.strip()]
     if not values:
-        emit({"event": "error", "cmd": "scrub", "message": "no PII values provided"})
+        emit({"cmd": "scrub", "status": "error", "message": "no PII values provided"})
         return
 
     input_pdf = state["pdf_path"]
@@ -650,9 +652,9 @@ def _serve_scrub(req: dict, state: dict, defaults: argparse.Namespace | None = N
             total_bboxes += 1
 
     emit({
-        "event": "progress",
         "cmd": "scrub",
-        "stage": "matched",
+        "phase": "redact",
+        "status": "in_progress",
         "bboxes": total_bboxes,
         "pages": len(page_bboxes),
     })
@@ -660,8 +662,9 @@ def _serve_scrub(req: dict, state: dict, defaults: argparse.Namespace | None = N
     if not page_bboxes:
         shutil.copyfile(input_pdf, output_pdf)
         emit({
-            "event": "done",
             "cmd": "scrub",
+            "phase": "redact",
+            "status": "done",
             "output": output_pdf,
             "redacted": False,
         })
@@ -675,16 +678,17 @@ def _serve_scrub(req: dict, state: dict, defaults: argparse.Namespace | None = N
         tb = traceback.format_exc()
         print(tb, file=sys.stderr)
         emit({
-            "event": "error",
             "cmd": "scrub",
+            "status": "error",
             "message": f"redaction failed: {type(exc).__name__}: {exc!r}",
             "traceback": tb,
         })
         return
 
     emit({
-        "event": "done",
         "cmd": "scrub",
+        "phase": "redact",
+        "status": "done",
         "output": output_pdf,
         "redacted": True,
     })
@@ -692,7 +696,7 @@ def _serve_scrub(req: dict, state: dict, defaults: argparse.Namespace | None = N
 
 def _serve_loop(defaults: argparse.Namespace) -> int:
     state: dict = {}
-    _emit({"event": "ready"})
+    _emit({"status": "ready"})
     try:
         for line in sys.stdin:
             line = line.strip()
@@ -701,7 +705,7 @@ def _serve_loop(defaults: argparse.Namespace) -> int:
             try:
                 req = json.loads(line)
             except json.JSONDecodeError as exc:
-                _emit({"event": "error", "message": f"invalid JSON: {exc}"})
+                _emit({"status": "error", "message": f"invalid JSON: {exc}"})
                 continue
 
             cmd = req.get("cmd")
@@ -712,7 +716,7 @@ def _serve_loop(defaults: argparse.Namespace) -> int:
             elif cmd == "close":
                 break
             else:
-                _emit({"event": "error", "message": f"unknown cmd: {cmd!r}"})
+                _emit({"status": "error", "message": f"unknown cmd: {cmd!r}"})
     finally:
         _cleanup_image_dir(state)
     return 0

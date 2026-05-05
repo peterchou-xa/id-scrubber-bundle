@@ -43,7 +43,12 @@ export type GlinerApi = typeof glinerApi;
 
 contextBridge.exposeInMainWorld('gliner', glinerApi);
 
-export type ServeEvent = Record<string, unknown> & { event: string; cmd?: string };
+export type ServeEvent = Record<string, unknown> & {
+  cmd?: string;
+  phase?: string;
+  status?: string;
+  kind?: string;
+};
 
 export type ScrubberCmdResult =
   | { ok: true; result: ServeEvent }

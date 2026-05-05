@@ -154,11 +154,6 @@ app.whenReady().then(() => {
 
   createWindow();
 
-  // Eager download: kick off the model fetch as soon as the window is up.
-  // The renderer subscribes to 'gliner:progress' to render the progress UI.
-  // If the model is already cached this resolves almost immediately.
-  void startGlinerDownload();
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

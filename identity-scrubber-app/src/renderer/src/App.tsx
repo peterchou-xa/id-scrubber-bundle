@@ -42,8 +42,8 @@ export function App(): JSX.Element {
               <ShieldIcon className="w-7 h-7 text-primary" />
             </div>
             <div>
-              <h1 className="tracking-tight text-2xl font-semibold m-0">PII Scrubber</h1>
-              <p className="text-sm text-muted-foreground m-0">Setting up AI engine</p>
+              <h1 className="tracking-tight text-2xl font-semibold m-0">Identity Scrubber</h1>
+              <p className="text-sm text-muted-foreground m-0">First-time setup</p>
             </div>
           </div>
           <div className="h-px bg-gradient-to-r from-primary via-primary/30 to-transparent mt-4" />
