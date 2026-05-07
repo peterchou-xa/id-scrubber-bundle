@@ -54,9 +54,14 @@ export type ScrubberCmdResult =
   | { ok: true; result: ServeEvent }
   | { ok: false; error: string };
 
+export type CustomPiiInput = { value: string; type?: string };
+
 const scrubberApi = {
-  detect: (pdfPath: string): Promise<ScrubberCmdResult> =>
-    ipcRenderer.invoke('scrubber:detect', pdfPath),
+  detect: (
+    pdfPath: string,
+    customPii?: Array<CustomPiiInput | string>,
+  ): Promise<ScrubberCmdResult> =>
+    ipcRenderer.invoke('scrubber:detect', pdfPath, customPii),
   scrub: (selected: string[], color?: string): Promise<ScrubberCmdResult> =>
     ipcRenderer.invoke('scrubber:scrub', selected, color),
   onEvent: (callback: (evt: ServeEvent) => void): (() => void) => {
@@ -86,3 +91,26 @@ const dialogApi = {
 export type DialogApi = typeof dialogApi;
 
 contextBridge.exposeInMainWorld('dialogApi', dialogApi);
+
+export type IdentifierType = 'name' | 'ssn' | 'dob' | 'email' | 'address' | 'other';
+
+export interface Identifier {
+  type: IdentifierType;
+  value: string;
+}
+
+export type IdentifiersLoadResult =
+  | { ok: true; values: Identifier[] }
+  | { ok: false; error: string };
+
+export type IdentifiersSaveResult = { ok: true } | { ok: false; error: string };
+
+const identifiersApi = {
+  load: (): Promise<IdentifiersLoadResult> => ipcRenderer.invoke('identifiers:load'),
+  save: (values: Identifier[]): Promise<IdentifiersSaveResult> =>
+    ipcRenderer.invoke('identifiers:save', values),
+};
+
+export type IdentifiersApi = typeof identifiersApi;
+
+contextBridge.exposeInMainWorld('identifiers', identifiersApi);

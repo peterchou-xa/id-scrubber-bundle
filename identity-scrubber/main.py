@@ -160,22 +160,62 @@ def is_valid_pii_item(item: dict) -> bool:
     return True
 
 
-def parse_custom_pii_values(raw_values: list[str] | None) -> set[str]:
-    """Parse custom PII values passed on the CLI.
+# Aliases used by the renderer / CLI that don't match canonical Python categories.
+_CUSTOM_PII_TYPE_ALIASES = {
+    "dob": "date_of_birth",
+    "ssn": "national_id",
+}
 
-    Supports multiple values after ``--custom-pii`` as well as comma/newline-
-    separated values within a single argument.
+
+def _normalize_custom_pii_type(raw_type: str | None) -> str:
+    t = (raw_type or "").strip().lower()
+    if not t:
+        return "other"
+    t = _CUSTOM_PII_TYPE_ALIASES.get(t, t)
+    return t if t in PII_CATEGORY_LABELS else "other"
+
+
+def parse_custom_pii_values(raw_values: list | None) -> dict[str, str]:
+    """Parse custom PII inputs into ``{value: type}``.
+
+    Accepts:
+      - plain strings (CLI ``--custom-pii``): ``"value"`` or ``"type=value"``;
+        commas/newlines split a single arg into multiple entries.
+      - dicts (serve mode IPC): ``{"value": "...", "type": "..."}``.
+
+    Unknown / missing types fall back to ``"other"``. If the same value
+    appears with different types, the last non-"other" type wins.
     """
     if not raw_values:
-        return set()
+        return {}
 
-    values: set[str] = set()
+    out: dict[str, str] = {}
+
+    def _add(value: str, pii_type: str) -> None:
+        value = value.strip()
+        if not value:
+            return
+        normalized = _normalize_custom_pii_type(pii_type)
+        existing = out.get(value)
+        if existing is None or (existing == "other" and normalized != "other"):
+            out[value] = normalized
+
     for raw in raw_values:
+        if isinstance(raw, dict):
+            _add(str(raw.get("value", "")), str(raw.get("type", "")))
+            continue
+        if not isinstance(raw, str):
+            continue
         for part in re.split(r"[\n,]", raw):
-            value = part.strip()
-            if value:
-                values.add(value)
-    return values
+            part = part.strip()
+            if not part:
+                continue
+            if "=" in part:
+                t, v = part.split("=", 1)
+                _add(v, t)
+            else:
+                _add(part, "")
+    return out
 
 
 def aggregate_results(all_items: list[dict]) -> list[dict]:
@@ -268,6 +308,7 @@ def _run_ocr_scrub(args, input_pdf: str, output_pdf: str, *, do_scrub: bool) -> 
             "model": args.model,
             "chunk_size": args.chunk_size,
             "ocr_dpi": args.ocr_dpi,
+            "custom_pii": args.custom_pii,
         },
     }
     state: dict = {}
@@ -286,27 +327,12 @@ def _run_ocr_scrub(args, input_pdf: str, output_pdf: str, *, do_scrub: bool) -> 
             item["value"] for item in state.get("all_items", [])
             if isinstance(item.get("value"), str) and item["value"].strip()
         }
-        custom_values = parse_custom_pii_values(args.custom_pii)
-        selected = sorted(detected_values | custom_values)
+        selected = sorted(detected_values)
         if not selected:
             print("No PII detected; nothing to redact.", file=sys.stderr)
             shutil.copyfile(input_pdf, output_pdf)
             print(f"Scrubbed PDF saved to: {output_pdf}", file=sys.stderr)
             return False
-
-        # Custom values weren't in the detect-time bbox map; match them now
-        # so _serve_scrub finds them in the cache.
-        if custom_values:
-            ocr_module = state["ocr_module"]
-            cached = state["bboxes_pdf_by_value"]
-            extras = [v for v in sorted(custom_values) if v not in cached]
-            for v in extras:
-                cached[v] = []
-            for page in state["pages"]:
-                per_value = ocr_module.find_pii_bboxes_by_value(page, extras)
-                for v, pdf_bboxes in per_value.items():
-                    for pdf_bbox in pdf_bboxes:
-                        cached[v].append((page.page_num, pdf_bbox))
 
         print(f"Redacting PDF (rasterizing at {args.ocr_dpi} DPI)...", file=sys.stderr)
         _serve_scrub(
@@ -350,6 +376,27 @@ def _cleanup_image_dir(state: dict) -> None:
         shutil.rmtree(image_dir, ignore_errors=True)
 
 
+def _bbox_mostly_inside(
+    inner: tuple[float, float, float, float],
+    outer: tuple[float, float, float, float],
+    threshold: float = 0.5,
+) -> bool:
+    """True if at least `threshold` of `inner`'s area overlaps `outer`."""
+    ix0, iy0, ix1, iy1 = inner
+    ox0, oy0, ox1, oy1 = outer
+    ax0 = max(ix0, ox0)
+    ay0 = max(iy0, oy0)
+    ax1 = min(ix1, ox1)
+    ay1 = min(iy1, oy1)
+    if ax1 <= ax0 or ay1 <= ay0:
+        return False
+    overlap = (ax1 - ax0) * (ay1 - ay0)
+    inner_area = (ix1 - ix0) * (iy1 - iy0)
+    if inner_area <= 0:
+        return False
+    return (overlap / inner_area) >= threshold
+
+
 def _detect_via_gliner_offsets(
     *,
     ocr_scrub,
@@ -360,6 +407,7 @@ def _detect_via_gliner_offsets(
     bboxes_px_by_value: dict,
     scale: float,
     page_height_by_num: dict,
+    suppress_bboxes_by_page: dict[int, list[tuple[float, float, float, float]]] | None,
     emit,
 ) -> tuple[list[dict], bool]:
     """Gliner code path: chunk full_text, but track each chunk's char offset
@@ -460,6 +508,15 @@ def _detect_via_gliner_offsets(
                 continue
             page_num = r["page_num"]
             pdf_bbox = r["bbox"]
+            if suppress_bboxes_by_page:
+                suppressors = suppress_bboxes_by_page.get(page_num, ())
+                if any(_bbox_mostly_inside(pdf_bbox, s) for s in suppressors):
+                    print(
+                        f"  [suppress] gliner hit inside custom-PII bbox: "
+                        f"page={page_num} bbox={pdf_bbox} value={r['value']!r}",
+                        file=sys.stderr, flush=True,
+                    )
+                    continue
             bbox_key = (
                 r["value"],
                 page_num,
@@ -482,6 +539,65 @@ def _detect_via_gliner_offsets(
     return all_items, False
 
 
+def _apply_custom_pii_matches(
+    *,
+    custom_values: dict[str, str],
+    pages: list,
+    ocr_module,
+    bboxes_pdf_by_value: dict,
+    bboxes_px_by_value: dict,
+    all_items: list[dict],
+    page_height_by_num: dict[int, float],
+    scale: float,
+    emit,
+) -> None:
+    """String-match user-supplied custom PII values against OCR'd pages and
+    populate the same bbox caches / emit the same events as the GLiNER path,
+    so the UI can preview-highlight them and the redactor can scrub them.
+
+    ``custom_values`` maps each value to its user-supplied PII type
+    (already normalized to a canonical category)."""
+    if not custom_values:
+        return
+
+    extras = sorted(v for v in custom_values if v not in bboxes_pdf_by_value)
+    if not extras:
+        return
+    for v in extras:
+        bboxes_pdf_by_value.setdefault(v, [])
+
+    seen_bbox_keys: set[tuple] = set()
+    emitted_values: set[str] = set()
+    for page in pages:
+        per_value = ocr_module.find_pii_bboxes_by_value(page, extras)
+        page_h = page_height_by_num[page.page_num]
+        for value, pdf_bboxes in per_value.items():
+            for pdf_bbox in pdf_bboxes:
+                bbox_key = (
+                    value,
+                    page.page_num,
+                    round(pdf_bbox[0], 1),
+                    round(pdf_bbox[1], 1),
+                    round(pdf_bbox[2], 1),
+                    round(pdf_bbox[3], 1),
+                )
+                if bbox_key in seen_bbox_keys:
+                    continue
+                seen_bbox_keys.add(bbox_key)
+
+                bboxes_pdf_by_value[value].append((page.page_num, pdf_bbox))
+                px = _pdf_bbox_to_pixel(pdf_bbox, page_h, scale)
+                bboxes_px_by_value.setdefault(value, []).append(
+                    {"page_num": page.page_num, **px}
+                )
+
+                if value not in emitted_values:
+                    item = {"type": custom_values.get(value, "other"), "value": value}
+                    all_items.append(item)
+                    emit({"cmd": "detect", "kind": "pii", "item": item})
+                    emitted_values.add(value)
+
+
 def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_emit) -> None:
     path = req.get("path")
     if not path:
@@ -493,6 +609,9 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
     chunk_size = int(opts.get("chunk_size", defaults.chunk_size))
     ocr_dpi = int(opts.get("ocr_dpi", defaults.ocr_dpi))
     debug_full_text = bool(opts.get("debug_full_text", getattr(defaults, "debug_full_text", False)))
+    custom_values = parse_custom_pii_values(
+        opts.get("custom_pii") or getattr(defaults, "custom_pii", None)
+    )
 
     _cleanup_image_dir(state)
     state.clear()
@@ -573,7 +692,26 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
     scale = ocr_dpi / 72.0
     page_height_by_num = {p.page_num: p.page_height for p in pages}
 
-    all_items, gliner_failed = _detect_via_gliner_offsets(
+    all_items: list[dict] = []
+
+    _apply_custom_pii_matches(
+        custom_values=custom_values,
+        pages=pages,
+        ocr_module=ocr_scrub,
+        bboxes_pdf_by_value=bboxes_pdf_by_value,
+        bboxes_px_by_value=bboxes_px_by_value,
+        all_items=all_items,
+        page_height_by_num=page_height_by_num,
+        scale=scale,
+        emit=emit,
+    )
+
+    suppress_bboxes_by_page: dict[int, list[tuple[float, float, float, float]]] = {}
+    for value in custom_values:
+        for page_num, pdf_bbox in bboxes_pdf_by_value.get(value, []):
+            suppress_bboxes_by_page.setdefault(page_num, []).append(pdf_bbox)
+
+    gliner_items, gliner_failed = _detect_via_gliner_offsets(
         ocr_scrub=ocr_scrub,
         full_text=full_text,
         word_spans=word_spans,
@@ -582,10 +720,12 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
         bboxes_px_by_value=bboxes_px_by_value,
         scale=scale,
         page_height_by_num=page_height_by_num,
+        suppress_bboxes_by_page=suppress_bboxes_by_page,
         emit=emit,
     )
     if gliner_failed:
         return
+    all_items.extend(gliner_items)
 
     aggregated = aggregate_results(all_items)
 
@@ -763,7 +903,9 @@ def main():
         nargs="+",
         help=(
             "Custom PII values to scrub. Pass one or more values after the flag "
-            "when a value may not be detected by GLiNER."
+            "when a value may not be detected by GLiNER. Each value may be "
+            "prefixed with a type, e.g. 'name=Peng Zhou' or 'email=foo@bar.com'. "
+            "Without a prefix the value is categorized as 'other'."
         ),
     )
     parser.add_argument(

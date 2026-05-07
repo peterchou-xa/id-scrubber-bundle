@@ -1,5 +1,58 @@
 import { useEffect, useMemo, useState } from 'react';
 
+type IdentifierType = 'name' | 'ssn' | 'dob' | 'email' | 'address' | 'other';
+
+interface Identifier {
+  type: IdentifierType;
+  value: string;
+}
+
+const IDENTIFIER_TYPES: { value: IdentifierType; label: string }[] = [
+  { value: 'name', label: 'Name' },
+  { value: 'ssn', label: 'SSN' },
+  { value: 'dob', label: 'Date of Birth' },
+  { value: 'email', label: 'Email' },
+  { value: 'address', label: 'Address' },
+  { value: 'other', label: 'Other' },
+];
+
+function formatIdentifierInput(type: IdentifierType, raw: string): string {
+  if (type === 'ssn') {
+    const digits = raw.replace(/\D/g, '').slice(0, 9);
+    if (digits.length <= 3) return digits;
+    if (digits.length <= 5) return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+    return `${digits.slice(0, 3)}-${digits.slice(3, 5)}-${digits.slice(5)}`;
+  }
+  if (type === 'dob') {
+    const digits = raw.replace(/\D/g, '').slice(0, 8);
+    if (digits.length <= 2) return digits;
+    if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+    return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+  }
+  return raw;
+}
+
+function placeholderFor(type: IdentifierType): string {
+  switch (type) {
+    case 'name': return 'Jane Doe';
+    case 'ssn': return '123-45-6789';
+    case 'dob': return 'MM/DD/YYYY';
+    case 'email': return 'jane@example.com';
+    case 'address': return '123 Main St, City, ST 12345';
+    case 'other': return 'Any value';
+    default: return '';
+  }
+}
+
+function validateIdentifier(type: IdentifierType, value: string): boolean {
+  const v = value.trim();
+  if (!v) return false;
+  if (type === 'ssn') return /^\d{3}-\d{2}-\d{4}$/.test(v);
+  if (type === 'dob') return /^\d{2}\/\d{2}\/\d{4}$/.test(v);
+  if (type === 'email') return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+  return true;
+}
+
 type AppState = 'empty' | 'detected' | 'scrubbed';
 
 interface PiiBBox {
@@ -67,6 +120,7 @@ function Icon({ path, className }: { path: string; className?: string }): JSX.El
 
 const ICONS = {
   shield: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
+  plus: 'M12 5v14 M5 12h14',
   fileUp: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M12 18v-6 M9 15l3-3 3 3',
   scan: 'M3 7V5a2 2 0 0 1 2-2h2 M17 3h2a2 2 0 0 1 2 2v2 M21 17v2a2 2 0 0 1-2 2h-2 M7 21H5a2 2 0 0 1-2-2v-2 M7 12h10',
   alertTriangle: 'M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z M12 9v4 M12 17h.01',
@@ -100,13 +154,183 @@ export function MainScreen(): JSX.Element {
   const [highlightColor, setHighlightColor] = useState<HighlightColor>('red');
   const [colorPickerOpen, setColorPickerOpen] = useState(false);
   const [detectStatus, setDetectStatus] = useState<DetectStatus | null>(null);
+  const [identifiersHintOpen, setIdentifiersHintOpen] = useState(false);
+  const [scanHintOpen, setScanHintOpen] = useState(false);
+  const [identifiersOpen, setIdentifiersOpen] = useState(false);
+  const [identifiers, setIdentifiers] = useState<Identifier[]>([]);
+  const [identifiersDraft, setIdentifiersDraft] = useState<Identifier[]>([
+    { type: 'name', value: '' },
+  ]);
+  const [identifiersSaving, setIdentifiersSaving] = useState(false);
+  const [identifiersShowErrors, setIdentifiersShowErrors] = useState(false);
+  const [identifiersShakeRound, setIdentifiersShakeRound] = useState(0);
+  const [identifiersShakeIndices, setIdentifiersShakeIndices] = useState<number[]>([]);
+
+  // Per-scan ("temporary") identifiers — used for the current scan only.
+  const [scanIdentifiers, setScanIdentifiers] = useState<Identifier[]>([]);
+  const [scanIdentifiersOpen, setScanIdentifiersOpen] = useState(false);
+  const [scanIdentifiersDraft, setScanIdentifiersDraft] = useState<Identifier[]>([
+    { type: 'name', value: '' },
+  ]);
+  const [scanIdentifiersShowErrors, setScanIdentifiersShowErrors] = useState(false);
+  const [scanIdentifiersShakeRound, setScanIdentifiersShakeRound] = useState(0);
+  const [scanIdentifiersShakeIndices, setScanIdentifiersShakeIndices] = useState<number[]>([]);
+
+  const openScanIdentifiers = (): void => {
+    setScanIdentifiersDraft(
+      scanIdentifiers.length > 0 ? scanIdentifiers : [{ type: 'name', value: '' }],
+    );
+    setScanIdentifiersShowErrors(false);
+    setScanIdentifiersOpen(true);
+  };
+
+  const updateScanDraftValueAt = (i: number, value: string): void => {
+    setScanIdentifiersDraft((prev) =>
+      prev.map((row, idx) =>
+        idx === i ? { ...row, value: formatIdentifierInput(row.type, value) } : row,
+      ),
+    );
+  };
+
+  const updateScanDraftTypeAt = (i: number, type: IdentifierType): void => {
+    setScanIdentifiersDraft((prev) =>
+      prev.map((row, idx) =>
+        idx === i ? { type, value: formatIdentifierInput(type, row.value) } : row,
+      ),
+    );
+  };
+
+  const removeScanDraftAt = (i: number): void => {
+    setScanIdentifiersDraft((prev) => {
+      const next = prev.filter((_, idx) => idx !== i);
+      return next.length === 0 ? [{ type: 'name', value: '' }] : next;
+    });
+    setScanIdentifiersShakeIndices([]);
+  };
+
+  const addScanDraftRow = (): void => {
+    setScanIdentifiersDraft((prev) => [...prev, { type: 'name', value: '' }]);
+    setScanIdentifiersShakeIndices([]);
+  };
+
+  const applyScanIdentifiersDraft = (): void => {
+    const emptyIndices = scanIdentifiersDraft
+      .map((r, idx) => (r.value.trim().length === 0 ? idx : -1))
+      .filter((idx) => idx >= 0);
+    // Allow a single empty placeholder row when applying — we just drop it.
+    const nonEmpty = scanIdentifiersDraft.filter((r) => r.value.trim().length > 0);
+    if (nonEmpty.length === 0 && scanIdentifiersDraft.length > 1) {
+      setScanIdentifiersShakeIndices(emptyIndices);
+      setScanIdentifiersShakeRound((n) => n + 1);
+      return;
+    }
+    const allValid = nonEmpty.every((r) => validateIdentifier(r.type, r.value));
+    if (!allValid) {
+      setScanIdentifiersShowErrors(true);
+      return;
+    }
+    const cleaned = nonEmpty.map((r) => ({ type: r.type, value: r.value.trim() }));
+    setScanIdentifiers(cleaned);
+    setScanIdentifiersOpen(false);
+  };
 
   const handleFileSelect = async (): Promise<void> => {
     const picked = await window.dialogApi.openPdf();
     if (picked) {
-      handleReset();
+      // Clear scan-result state but preserve one-off identifiers — the user
+      // may have added them in preparation for the file they're picking now.
+      setAppState('empty');
+      setPiiItems([]);
+      setIsScanning(false);
+      setIsScrubbing(false);
+      setScrubbedPath('');
+      setPages(new Map());
+      setHoveredValue(null);
       setSelectedFile(picked.name);
       setSelectedFilePath(picked.path);
+    }
+  };
+
+  useEffect(() => {
+    window.identifiers.load().then((res) => {
+      if (res.ok) setIdentifiers(res.values);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!identifiersOpen && !scanIdentifiersOpen) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return;
+      if (scanIdentifiersOpen) setScanIdentifiersOpen(false);
+      else if (identifiersOpen) setIdentifiersOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [identifiersOpen, scanIdentifiersOpen]);
+
+  const openIdentifiers = (): void => {
+    setIdentifiersDraft(
+      identifiers.length > 0 ? identifiers : [{ type: 'name', value: '' }],
+    );
+    setIdentifiersShowErrors(false);
+    setIdentifiersOpen(true);
+  };
+
+  const updateDraftValueAt = (i: number, value: string): void => {
+    setIdentifiersDraft((prev) =>
+      prev.map((row, idx) =>
+        idx === i ? { ...row, value: formatIdentifierInput(row.type, value) } : row,
+      ),
+    );
+  };
+
+  const updateDraftTypeAt = (i: number, type: IdentifierType): void => {
+    setIdentifiersDraft((prev) =>
+      prev.map((row, idx) =>
+        idx === i ? { type, value: formatIdentifierInput(type, row.value) } : row,
+      ),
+    );
+  };
+
+  const removeDraftAt = (i: number): void => {
+    setIdentifiersDraft((prev) => {
+      const next = prev.filter((_, idx) => idx !== i);
+      return next.length === 0 ? [{ type: 'name', value: '' }] : next;
+    });
+    setIdentifiersShakeIndices([]);
+  };
+
+  const addDraftRow = (): void => {
+    setIdentifiersDraft((prev) => [...prev, { type: 'name', value: '' }]);
+    setIdentifiersShakeIndices([]);
+  };
+
+  const saveIdentifiersDraft = async (): Promise<void> => {
+    const emptyIndices = identifiersDraft
+      .map((r, idx) => (r.value.trim().length === 0 ? idx : -1))
+      .filter((idx) => idx >= 0);
+    if (emptyIndices.length > 0) {
+      setIdentifiersShakeIndices(emptyIndices);
+      setIdentifiersShakeRound((n) => n + 1);
+      return;
+    }
+    const allValid = identifiersDraft.every((r) => validateIdentifier(r.type, r.value));
+    if (!allValid) {
+      setIdentifiersShowErrors(true);
+      return;
+    }
+    const cleaned = identifiersDraft.map((r) => ({ type: r.type, value: r.value.trim() }));
+    setIdentifiersSaving(true);
+    try {
+      const res = await window.identifiers.save(cleaned);
+      if (res.ok) {
+        setIdentifiers(cleaned);
+        setIdentifiersOpen(false);
+      } else {
+        console.error('identifiers save error:', res.error);
+      }
+    } finally {
+      setIdentifiersSaving(false);
     }
   };
 
@@ -180,7 +404,11 @@ export function MainScreen(): JSX.Element {
     setPiiItems([]);
     setPages(new Map());
     setHoveredValue(null);
-    window.scrubber.detect(selectedFilePath).then((res) => {
+    const customPii = [
+      ...identifiers.map((i) => ({ value: i.value, type: i.type })),
+      ...scanIdentifiers.map((i) => ({ value: i.value, type: i.type })),
+    ];
+    window.scrubber.detect(selectedFilePath, customPii).then((res) => {
       if (!res.ok) {
         console.error('detect error:', res.error);
         setIsScanning(false);
@@ -227,6 +455,7 @@ export function MainScreen(): JSX.Element {
     setScrubbedPath('');
     setPages(new Map());
     setHoveredValue(null);
+    setScanIdentifiers([]);
   };
 
   // Show all checked PII bboxes on the current preview page as translucent
@@ -300,7 +529,7 @@ export function MainScreen(): JSX.Element {
           <div className="w-7 h-7 bg-primary/10 border border-primary rounded-md flex items-center justify-center">
             <Icon path={ICONS.shield} className="w-4 h-4 text-primary" />
           </div>
-          <h1 className="tracking-tight text-base font-semibold">PII Scrubber</h1>
+          <h1 className="tracking-tight text-base font-semibold">Identity Scrubber</h1>
         </div>
 
         <div className="flex-1 min-h-0 flex gap-6">
@@ -351,8 +580,66 @@ export function MainScreen(): JSX.Element {
               </div>
             )}
 
-            {/* Primary action button */}
-            {selectedFile && appState === 'empty' && (
+            {/* Detection inputs: persistent ("My Identifiers") + per-scan one-offs. */}
+            <div className="mt-3 flex items-center gap-2 flex-wrap">
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={openIdentifiers}
+                  onMouseEnter={() => setIdentifiersHintOpen(true)}
+                  onMouseLeave={() => setIdentifiersHintOpen(false)}
+                  onFocus={() => setIdentifiersHintOpen(true)}
+                  onBlur={() => setIdentifiersHintOpen(false)}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-primary border border-primary/30 bg-primary/5 hover:bg-primary/10 rounded-md transition-colors cursor-pointer"
+                >
+                  <Icon path={ICONS.plus} className="w-3.5 h-3.5" />
+                  <span>
+                    Saved Identifiers
+                    {identifiers.length > 0 && (
+                      <span className="ml-1 text-primary/70">({identifiers.length})</span>
+                    )}
+                  </span>
+                </button>
+                {identifiersHintOpen && !identifiersOpen && (
+                  <div
+                    role="tooltip"
+                    className="absolute left-0 top-full mt-1.5 z-20 w-64 px-3 py-2 bg-secondary border border-border text-foreground text-xs leading-relaxed rounded-lg shadow-md pointer-events-none"
+                  >
+                    <b>Used in every scan.</b> Saved on this device — for things that are always you, like your name, SSN, or date of birth.
+                  </div>
+                )}
+              </div>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={openScanIdentifiers}
+                  onMouseEnter={() => setScanHintOpen(true)}
+                  onMouseLeave={() => setScanHintOpen(false)}
+                  onFocus={() => setScanHintOpen(true)}
+                  onBlur={() => setScanHintOpen(false)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-muted-foreground border border-dashed border-border rounded-md hover:text-foreground hover:border-foreground/40 transition-colors cursor-pointer"
+                >
+                  <Icon path={ICONS.plus} className="w-3 h-3" />
+                  <span>
+                    One-off Identifiers
+                    {scanIdentifiers.length > 0 && (
+                      <span className="ml-1 text-foreground/70">({scanIdentifiers.length})</span>
+                    )}
+                  </span>
+                </button>
+                {scanHintOpen && !scanIdentifiersOpen && (
+                  <div
+                    role="tooltip"
+                    className="absolute left-0 top-full mt-1.5 z-20 w-64 px-3 py-2 bg-secondary border border-border text-foreground text-xs leading-relaxed rounded-lg shadow-md pointer-events-none"
+                  >
+                    <b>Used in this scan only.</b> Not saved — for values specific to this document, like a case number or counterparty name.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Primary action: Run / Re-run Detection */}
+            {selectedFile && (
               <button
                 onClick={handleDetect}
                 disabled={isScanning}
@@ -360,54 +647,18 @@ export function MainScreen(): JSX.Element {
               >
                 <Icon path={ICONS.scan} className="w-4 h-4" />
                 <span className="font-medium">
-                  {isScanning ? 'Scanning...' : 'Run Detection'}
+                  {isScanning
+                    ? 'Scanning...'
+                    : appState === 'empty'
+                      ? 'Run Detection'
+                      : 'Re-run Detection'}
                 </span>
               </button>
-            )}
-
-            {appState === 'detected' && (
-              <button
-                onClick={handleScrub}
-                disabled={isScrubbing || piiItems.filter((p) => p.checked).length === 0}
-                className="mt-3 w-full px-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                <Icon path={ICONS.alertTriangle} className="w-4 h-4" />
-                <span className="font-medium">
-                  {isScrubbing ? 'Scrubbing...' : 'Execute Scrub'}
-                </span>
-              </button>
-            )}
-
-            {appState === 'scrubbed' && (
-              <div className="mt-3 flex flex-col gap-2">
-                <div className="bg-primary/5 border border-primary/20 rounded-lg p-3 flex items-center gap-3">
-                  <Icon path={ICONS.checkCircle} className="w-6 h-6 text-primary flex-shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium">Scrub complete</p>
-                    <button
-                      onClick={handleOpenScrubbed}
-                      className="text-xs text-primary hover:underline truncate block w-full text-left cursor-pointer"
-                      title={scrubbedPath}
-                    >
-                      {scrubbedPath ? scrubbedPath.split('/').pop() : ''}
-                    </button>
-                  </div>
-                </div>
-                <button
-                  onClick={handleReset}
-                  className="w-full px-4 py-2 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all flex items-center justify-center gap-2"
-                >
-                  <Icon path={ICONS.refresh} className="w-4 h-4" />
-                  <span className="text-sm font-medium">Start Over</span>
-                </button>
-              </div>
             )}
 
             <div className="h-px bg-border my-4" />
 
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="font-semibold text-base">Detection Results</h2>
-            </div>
+            <h2 className="font-semibold text-base mb-3">Detection Results</h2>
 
             {piiItems.length === 0 && !isScanning && (
               <div className="flex-1 flex flex-col items-center justify-center text-center py-8">
@@ -507,6 +758,50 @@ export function MainScreen(): JSX.Element {
                     </span>
                   </div>
                 </div>
+
+                {appState === 'detected' && (
+                  <div className="sticky bottom-0 -mx-5 -mb-5 mt-3 px-5 py-3 bg-card border-t border-border">
+                    <button
+                      onClick={handleScrub}
+                      disabled={isScrubbing || piiItems.filter((p) => p.checked).length === 0}
+                      className="w-full px-4 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      <Icon path={ICONS.alertTriangle} className="w-4 h-4" />
+                      <span className="font-medium">
+                        {isScrubbing
+                          ? 'Scrubbing...'
+                          : piiItems.filter((p) => p.checked).length === 0
+                            ? 'Select at least one item'
+                            : 'Execute Scrub'}
+                      </span>
+                    </button>
+                  </div>
+                )}
+
+                {appState === 'scrubbed' && (
+                  <div className="sticky bottom-0 -mx-5 -mb-5 mt-3 px-5 pt-6 pb-6 bg-card border-t border-border flex flex-col gap-3 animate-slide-up-fade">
+                    <div className="bg-primary/5 border border-primary/20 rounded-lg p-3 flex items-center gap-3">
+                      <Icon path={ICONS.checkCircle} className="w-6 h-6 text-primary flex-shrink-0 animate-check-pop" />
+                      <div className="flex-1 min-w-0 animate-text-fade-in">
+                        <p className="text-sm font-medium">Scrub complete</p>
+                        <button
+                          onClick={handleOpenScrubbed}
+                          className="text-xs text-primary hover:underline truncate block w-full text-left cursor-pointer"
+                          title={scrubbedPath}
+                        >
+                          {scrubbedPath ? scrubbedPath.split('/').pop() : ''}
+                        </button>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleReset}
+                      className="w-full px-4 py-2 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-all flex items-center justify-center gap-2"
+                    >
+                      <Icon path={ICONS.refresh} className="w-4 h-4" />
+                      <span className="text-sm font-medium">Start Over</span>
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -620,6 +915,243 @@ export function MainScreen(): JSX.Element {
           </div>
         </div>
       </div>
+
+      {identifiersOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setIdentifiersOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="identifiers-modal-title"
+            className="w-full max-w-lg bg-card border border-border rounded-xl shadow-xl p-5 flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-1">
+              <h3 id="identifiers-modal-title" className="font-semibold text-base">
+                Saved Identifiers
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIdentifiersOpen(false)}
+                aria-label="Close"
+                className="p-1 -mr-1 rounded-md text-muted-foreground hover:bg-secondary transition-colors cursor-pointer"
+              >
+                <Icon path={ICONS.x} className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-4">
+              Saved locally on this device and always included in detection.
+            </p>
+
+            <div className="flex flex-col gap-2 mb-3 max-h-[50vh] overflow-y-auto pr-1">
+              {identifiersDraft.map((row, i) => {
+                const trimmed = row.value.trim();
+                const invalid =
+                  identifiersShowErrors &&
+                  trimmed.length > 0 &&
+                  !validateIdentifier(row.type, row.value);
+                return (
+                  <div key={i} className="flex items-start gap-2">
+                    <select
+                      value={row.type}
+                      onChange={(e) => updateDraftTypeAt(i, e.target.value as IdentifierType)}
+                      className="px-2 py-2 text-sm bg-secondary border border-border rounded-md outline-none focus:border-primary/50 focus:bg-card transition-colors cursor-pointer flex-shrink-0 w-32"
+                    >
+                      {IDENTIFIER_TYPES.map((t) => (
+                        <option key={t.value} value={t.value}>
+                          {t.label}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="flex-1 min-w-0">
+                      <input
+                        key={`val-${i}-${identifiersShakeIndices.includes(i) ? identifiersShakeRound : 0}`}
+                        type="text"
+                        value={row.value}
+                        onChange={(e) => updateDraftValueAt(i, e.target.value)}
+                        placeholder={placeholderFor(row.type)}
+                        inputMode={row.type === 'ssn' || row.type === 'dob' ? 'numeric' : undefined}
+                        className={`w-full px-3 py-2 text-sm bg-secondary border rounded-md outline-none focus:bg-card transition-colors placeholder:text-muted-foreground/40 ${
+                          invalid
+                            ? 'border-primary ring-2 ring-primary/20 focus:border-primary'
+                            : 'border-border focus:border-primary/50'
+                        } ${
+                          identifiersShakeIndices.includes(i) && row.value.trim().length === 0
+                            ? 'animate-shake border-primary ring-2 ring-primary/20'
+                            : ''
+                        }`}
+                      />
+                      {invalid && (
+                        <p className="text-xs text-primary mt-1">
+                          {row.type === 'ssn' && 'Format: 123-45-6789'}
+                          {row.type === 'dob' && 'Format: MM/DD/YYYY'}
+                          {row.type === 'email' && 'Enter a valid email address'}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeDraftAt(i)}
+                      aria-label="Remove identifier"
+                      title="Remove"
+                      className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors cursor-pointer flex-shrink-0"
+                    >
+                      <Icon path={ICONS.x} className="w-4 h-4" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            <button
+              type="button"
+              onClick={addDraftRow}
+              className="self-start inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline mb-5 cursor-pointer"
+            >
+              <Icon path={ICONS.plus} className="w-3.5 h-3.5" />
+              Add another
+            </button>
+
+            <div className="flex justify-end gap-2 pt-3 border-t border-border">
+              <button
+                type="button"
+                onClick={() => setIdentifiersOpen(false)}
+                className="px-3 py-1.5 text-sm font-medium rounded-md hover:bg-secondary transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveIdentifiersDraft}
+                disabled={identifiersSaving}
+                className="px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 transition-colors cursor-pointer"
+              >
+                {identifiersSaving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {scanIdentifiersOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setScanIdentifiersOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="scan-identifiers-modal-title"
+            className="w-full max-w-lg bg-card border border-border rounded-xl shadow-xl p-5 flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-1">
+              <h3 id="scan-identifiers-modal-title" className="font-semibold text-base">
+                One-off Identifiers
+              </h3>
+              <button
+                type="button"
+                onClick={() => setScanIdentifiersOpen(false)}
+                aria-label="Close"
+                className="p-1 -mr-1 rounded-md text-muted-foreground hover:bg-secondary transition-colors cursor-pointer"
+              >
+                <Icon path={ICONS.x} className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-4">
+              Used for this scan only. Not saved — for values specific to this document, like a case number or counterparty name.
+            </p>
+
+            <div className="flex flex-col gap-2 mb-3 max-h-[50vh] overflow-y-auto pr-1">
+              {scanIdentifiersDraft.map((row, i) => {
+                const trimmed = row.value.trim();
+                const invalid =
+                  scanIdentifiersShowErrors &&
+                  trimmed.length > 0 &&
+                  !validateIdentifier(row.type, row.value);
+                return (
+                  <div key={i} className="flex items-start gap-2">
+                    <select
+                      value={row.type}
+                      onChange={(e) => updateScanDraftTypeAt(i, e.target.value as IdentifierType)}
+                      className="px-2 py-2 text-sm bg-secondary border border-border rounded-md outline-none focus:border-primary/50 focus:bg-card transition-colors cursor-pointer flex-shrink-0 w-32"
+                    >
+                      {IDENTIFIER_TYPES.map((t) => (
+                        <option key={t.value} value={t.value}>
+                          {t.label}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="flex-1 min-w-0">
+                      <input
+                        key={`scan-val-${i}-${scanIdentifiersShakeIndices.includes(i) ? scanIdentifiersShakeRound : 0}`}
+                        type="text"
+                        value={row.value}
+                        onChange={(e) => updateScanDraftValueAt(i, e.target.value)}
+                        placeholder={placeholderFor(row.type)}
+                        inputMode={row.type === 'ssn' || row.type === 'dob' ? 'numeric' : undefined}
+                        className={`w-full px-3 py-2 text-sm bg-secondary border rounded-md outline-none focus:bg-card transition-colors placeholder:text-muted-foreground/40 ${
+                          invalid
+                            ? 'border-primary ring-2 ring-primary/20 focus:border-primary'
+                            : 'border-border focus:border-primary/50'
+                        } ${
+                          scanIdentifiersShakeIndices.includes(i) && row.value.trim().length === 0
+                            ? 'animate-shake border-primary ring-2 ring-primary/20'
+                            : ''
+                        }`}
+                      />
+                      {invalid && (
+                        <p className="text-xs text-primary mt-1">
+                          {row.type === 'ssn' && 'Format: 123-45-6789'}
+                          {row.type === 'dob' && 'Format: MM/DD/YYYY'}
+                          {row.type === 'email' && 'Enter a valid email address'}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeScanDraftAt(i)}
+                      aria-label="Remove identifier"
+                      title="Remove"
+                      className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors cursor-pointer flex-shrink-0"
+                    >
+                      <Icon path={ICONS.x} className="w-4 h-4" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            <button
+              type="button"
+              onClick={addScanDraftRow}
+              className="self-start inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline mb-5 cursor-pointer"
+            >
+              <Icon path={ICONS.plus} className="w-3.5 h-3.5" />
+              Add another
+            </button>
+
+            <div className="flex justify-end gap-2 pt-3 border-t border-border">
+              <button
+                type="button"
+                onClick={() => setScanIdentifiersOpen(false)}
+                className="px-3 py-1.5 text-sm font-medium rounded-md hover:bg-secondary transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={applyScanIdentifiersDraft}
+                className="px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 transition-colors cursor-pointer"
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

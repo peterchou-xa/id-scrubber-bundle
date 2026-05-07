@@ -9,6 +9,7 @@ import {
   GlinerStatus,
 } from './gliner';
 import { scrubberService, ServeEvent } from './scrubber';
+import { loadIdentifiers, saveIdentifiers } from './identifiersStore';
 
 let mainWindow: BrowserWindow | null = null;
 let downloadInFlight = false;
@@ -113,12 +114,34 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('scrubber:detect', async (_evt, pdfPath: string) => {
+  ipcMain.handle(
+    'scrubber:detect',
+    async (
+      _evt,
+      pdfPath: string,
+      customPii?: Array<{ value: string; type?: string } | string>,
+    ) => {
     try {
-      const result = await scrubberService.runCommand(
-        { cmd: 'detect', path: pdfPath },
-        forwardEvent,
-      );
+      const req: Record<string, unknown> = { cmd: 'detect', path: pdfPath };
+      const cleaned = (customPii ?? [])
+        .map((entry) => {
+          if (typeof entry === 'string') {
+            const v = entry.trim();
+            return v ? { value: v, type: 'other' } : null;
+          }
+          if (entry && typeof entry === 'object' && typeof entry.value === 'string') {
+            const v = entry.value.trim();
+            if (!v) return null;
+            const t = typeof entry.type === 'string' ? entry.type.trim() : '';
+            return { value: v, type: t || 'other' };
+          }
+          return null;
+        })
+        .filter((v): v is { value: string; type: string } => v !== null);
+      if (cleaned.length > 0) {
+        req.options = { custom_pii: cleaned };
+      }
+      const result = await scrubberService.runCommand(req, forwardEvent);
       return { ok: true, result };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -139,6 +162,24 @@ app.whenReady().then(() => {
   ipcMain.handle('shell:openPath', async (_evt, filePath: string) => {
     const err = await shell.openPath(filePath);
     return { ok: err === '', error: err || undefined };
+  });
+
+  ipcMain.handle('identifiers:load', async () => {
+    try {
+      const values = await loadIdentifiers();
+      return { ok: true, values };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  ipcMain.handle('identifiers:save', async (_evt, values: string[]) => {
+    try {
+      await saveIdentifiers(values);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
   });
 
   ipcMain.handle('dialog:openPdf', async () => {
