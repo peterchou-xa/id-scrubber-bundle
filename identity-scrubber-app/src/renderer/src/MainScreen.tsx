@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 type IdentifierType = 'name' | 'ssn' | 'dob' | 'email' | 'address' | 'other';
 
@@ -458,6 +458,22 @@ export function MainScreen(): JSX.Element {
     setScanIdentifiers([]);
   };
 
+  const previewBoxRef = useRef<HTMLDivElement>(null);
+  const [previewBoxSize, setPreviewBoxSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+
+  useLayoutEffect(() => {
+    const el = previewBoxRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const cr = entry.contentRect;
+        setPreviewBoxSize({ w: cr.width, h: cr.height });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   // Show all checked PII bboxes on the current preview page as translucent
   // highlights. Hovering a PII entry jumps to its page (if different) and
   // emphasizes its boxes.
@@ -580,64 +596,6 @@ export function MainScreen(): JSX.Element {
               </div>
             )}
 
-            {/* Detection inputs: persistent ("My Identifiers") + per-scan one-offs. */}
-            <div className="mt-3 flex items-center gap-2 flex-wrap">
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={openIdentifiers}
-                  onMouseEnter={() => setIdentifiersHintOpen(true)}
-                  onMouseLeave={() => setIdentifiersHintOpen(false)}
-                  onFocus={() => setIdentifiersHintOpen(true)}
-                  onBlur={() => setIdentifiersHintOpen(false)}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-primary border border-primary/30 bg-primary/5 hover:bg-primary/10 rounded-md transition-colors cursor-pointer"
-                >
-                  <Icon path={ICONS.plus} className="w-3.5 h-3.5" />
-                  <span>
-                    Saved Identifiers
-                    {identifiers.length > 0 && (
-                      <span className="ml-1 text-primary/70">({identifiers.length})</span>
-                    )}
-                  </span>
-                </button>
-                {identifiersHintOpen && !identifiersOpen && (
-                  <div
-                    role="tooltip"
-                    className="absolute left-0 top-full mt-1.5 z-20 w-64 px-3 py-2 bg-secondary border border-border text-foreground text-xs leading-relaxed rounded-lg shadow-md pointer-events-none"
-                  >
-                    <b>Used in every scan.</b> Saved on this device — for things that are always you, like your name, SSN, or date of birth.
-                  </div>
-                )}
-              </div>
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={openScanIdentifiers}
-                  onMouseEnter={() => setScanHintOpen(true)}
-                  onMouseLeave={() => setScanHintOpen(false)}
-                  onFocus={() => setScanHintOpen(true)}
-                  onBlur={() => setScanHintOpen(false)}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs text-muted-foreground border border-dashed border-border rounded-md hover:text-foreground hover:border-foreground/40 transition-colors cursor-pointer"
-                >
-                  <Icon path={ICONS.plus} className="w-3 h-3" />
-                  <span>
-                    One-off Identifiers
-                    {scanIdentifiers.length > 0 && (
-                      <span className="ml-1 text-foreground/70">({scanIdentifiers.length})</span>
-                    )}
-                  </span>
-                </button>
-                {scanHintOpen && !scanIdentifiersOpen && (
-                  <div
-                    role="tooltip"
-                    className="absolute left-0 top-full mt-1.5 z-20 w-64 px-3 py-2 bg-secondary border border-border text-foreground text-xs leading-relaxed rounded-lg shadow-md pointer-events-none"
-                  >
-                    <b>Used in this scan only.</b> Not saved — for values specific to this document, like a case number or counterparty name.
-                  </div>
-                )}
-              </div>
-            </div>
-
             {/* Primary action: Run / Re-run Detection */}
             {selectedFile && (
               <button
@@ -658,7 +616,63 @@ export function MainScreen(): JSX.Element {
 
             <div className="h-px bg-border my-4" />
 
-            <h2 className="font-semibold text-base mb-3">Detection Results</h2>
+            <h2 className="font-semibold text-base mb-3">Known Identifiers</h2>
+
+            {/* Detection inputs: persistent ("My Identifiers") + per-scan one-offs. */}
+            <div className="grid grid-cols-2 gap-2">
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={openIdentifiers}
+                  onMouseEnter={() => setIdentifiersHintOpen(true)}
+                  onMouseLeave={() => setIdentifiersHintOpen(false)}
+                  onFocus={() => setIdentifiersHintOpen(true)}
+                  onBlur={() => setIdentifiersHintOpen(false)}
+                  className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1 text-xs font-medium text-primary border border-primary/30 bg-primary/5 hover:bg-primary/10 rounded-md transition-colors cursor-pointer"
+                >
+                  <Icon path={ICONS.plus} className="w-3.5 h-3.5" />
+                  <span>Saved Identifiers</span>
+                  {identifiers.length > 0 && (
+                    <span className="text-primary/70">({identifiers.length})</span>
+                  )}
+                </button>
+                {identifiersHintOpen && !identifiersOpen && (
+                  <div
+                    role="tooltip"
+                    className="absolute left-0 top-full mt-1.5 z-20 w-64 px-3 py-2 bg-secondary border border-border text-foreground text-xs leading-relaxed rounded-lg shadow-md pointer-events-none"
+                  >
+                    <b>Used in every scan.</b> Saved on this device — for things that are always you, like your name, SSN, or date of birth.
+                  </div>
+                )}
+              </div>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={openScanIdentifiers}
+                  onMouseEnter={() => setScanHintOpen(true)}
+                  onMouseLeave={() => setScanHintOpen(false)}
+                  onFocus={() => setScanHintOpen(true)}
+                  onBlur={() => setScanHintOpen(false)}
+                  className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1 text-xs font-medium text-muted-foreground border border-dashed border-border rounded-md hover:text-foreground hover:border-foreground/40 transition-colors cursor-pointer"
+                >
+                  <Icon path={ICONS.plus} className="w-3.5 h-3.5" />
+                  <span>One-off Identifiers</span>
+                  {scanIdentifiers.length > 0 && (
+                    <span className="text-foreground/70">({scanIdentifiers.length})</span>
+                  )}
+                </button>
+                {scanHintOpen && !scanIdentifiersOpen && (
+                  <div
+                    role="tooltip"
+                    className="absolute left-0 top-full mt-1.5 z-20 w-64 px-3 py-2 bg-secondary border border-border text-foreground text-xs leading-relaxed rounded-lg shadow-md pointer-events-none"
+                  >
+                    <b>Used in this scan only.</b> Not saved — for values specific to this document, like a case number or counterparty name.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <h2 className="font-semibold text-base mt-5 mb-3">Detected Identifiers</h2>
 
             {piiItems.length === 0 && !isScanning && (
               <div className="flex-1 flex flex-col items-center justify-center text-center py-8">
@@ -867,7 +881,7 @@ export function MainScreen(): JSX.Element {
               )}
             </div>
 
-            <div className="flex-1 min-h-0 flex items-center justify-center">
+            <div ref={previewBoxRef} className="flex-1 min-h-0 flex items-center justify-center">
               {!previewPanel && (
                 <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground">
                   <Icon path={ICONS.file} className="w-12 h-12 text-muted-foreground/40 mb-3" />
@@ -875,12 +889,16 @@ export function MainScreen(): JSX.Element {
                   <p className="mt-1">Hover a PII entry to highlight its location.</p>
                 </div>
               )}
-              {previewPanel && (
+              {previewPanel && (() => {
+                const ar = previewPanel.page.image_width / previewPanel.page.image_height;
+                const pw = previewBoxSize.w;
+                const ph = previewBoxSize.h;
+                const fitW = Math.min(pw, ph * ar);
+                const fitH = Math.min(ph, pw / ar);
+                return (
                 <div
-                  className="relative bg-secondary border border-border rounded h-full max-w-full"
-                  style={{
-                    aspectRatio: `${previewPanel.page.image_width} / ${previewPanel.page.image_height}`,
-                  }}
+                  className="relative bg-secondary border border-border rounded"
+                  style={{ width: fitW, height: fitH }}
                 >
                   <img
                     src={imgUrl(previewPanel.page.image_path)}
@@ -910,7 +928,8 @@ export function MainScreen(): JSX.Element {
                     );
                   })}
                 </div>
-              )}
+                );
+              })()}
             </div>
           </div>
         </div>
