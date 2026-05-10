@@ -10,6 +10,7 @@ import {
 } from './gliner';
 import { scrubberService, ServeEvent } from './scrubber';
 import { loadIdentifiers, saveIdentifiers } from './identifiersStore';
+import { recordScrubEvent } from './metrics';
 
 let mainWindow: BrowserWindow | null = null;
 let downloadInFlight = false;
@@ -148,16 +149,27 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('scrubber:scrub', async (_evt, selected: string[], color?: string) => {
-    try {
-      const req: Record<string, unknown> = { cmd: 'scrub', selected };
-      if (color) req.color = color;
-      const result = await scrubberService.runCommand(req, forwardEvent);
-      return { ok: true, result };
-    } catch (err) {
-      return { ok: false, error: (err as Error).message };
-    }
-  });
+  ipcMain.handle(
+    'scrubber:scrub',
+    async (
+      _evt,
+      selected: string[],
+      color?: string,
+      byType?: Record<string, number>,
+    ) => {
+      try {
+        const req: Record<string, unknown> = { cmd: 'scrub', selected };
+        if (color) req.color = color;
+        const result = await scrubberService.runCommand(req, forwardEvent);
+        if (byType && Object.keys(byType).length > 0) {
+          void recordScrubEvent({ count: selected.length, byType });
+        }
+        return { ok: true, result };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    },
+  );
 
   ipcMain.handle('shell:openPath', async (_evt, filePath: string) => {
     const err = await shell.openPath(filePath);

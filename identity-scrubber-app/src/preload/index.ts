@@ -62,8 +62,12 @@ const scrubberApi = {
     customPii?: Array<CustomPiiInput | string>,
   ): Promise<ScrubberCmdResult> =>
     ipcRenderer.invoke('scrubber:detect', pdfPath, customPii),
-  scrub: (selected: string[], color?: string): Promise<ScrubberCmdResult> =>
-    ipcRenderer.invoke('scrubber:scrub', selected, color),
+  scrub: (
+    selected: string[],
+    color?: string,
+    byType?: Record<string, number>,
+  ): Promise<ScrubberCmdResult> =>
+    ipcRenderer.invoke('scrubber:scrub', selected, color, byType),
   onEvent: (callback: (evt: ServeEvent) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, evt: ServeEvent): void => callback(evt);
     ipcRenderer.on('scrubber:event', listener);

@@ -424,11 +424,20 @@ export function MainScreen(): JSX.Element {
   };
 
   const handleScrub = async (): Promise<void> => {
-    const selected = piiItems.filter((p) => p.checked).map((p) => p.value);
+    const checked = piiItems.filter((p) => p.checked);
+    const selected = checked.map((p) => p.value);
     if (selected.length === 0) return;
+    const byType = checked.reduce<Record<string, number>>((acc, p) => {
+      acc[p.type] = (acc[p.type] ?? 0) + 1;
+      return acc;
+    }, {});
     setIsScrubbing(true);
     try {
-      const res = await window.scrubber.scrub(selected, HIGHLIGHT_COLORS[highlightColor].base);
+      const res = await window.scrubber.scrub(
+        selected,
+        HIGHLIGHT_COLORS[highlightColor].base,
+        byType,
+      );
       if (res.ok) {
         const output = (res.result.output as string) ?? '';
         setScrubbedPath(output);
