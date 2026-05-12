@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { ScrubMetricsModule } from './scrub-metrics/scrub-metrics.module';
+import { BillingModule } from './billing/billing.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { ScrubMetricsModule } from './scrub-metrics/scrub-metrics.module';
       synchronize: false,
     }),
     ScrubMetricsModule,
+    BillingModule,
   ],
   controllers: [AppController],
   providers: [AppService],

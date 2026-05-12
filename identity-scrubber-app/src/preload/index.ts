@@ -118,3 +118,39 @@ const identifiersApi = {
 export type IdentifiersApi = typeof identifiersApi;
 
 contextBridge.exposeInMainWorld('identifiers', identifiersApi);
+
+export interface BalanceView {
+  usage: number;
+  granted: number;
+  resets_at?: string;
+  expires_at?: string;
+}
+
+export interface ConsumeResponse {
+  allow: boolean;
+  reason?: 'invalid_device' | 'insufficient_balance' | 'network_error';
+  consumed?: { free_daily: number; free_week1: number; prepaid: number };
+  free_daily?: BalanceView;
+  free_week1?: BalanceView;
+  prepaid?: { usage: number; granted: number } | null;
+  error?: string;
+}
+
+export interface BalanceResponse {
+  ok: boolean;
+  reason?: 'invalid_device' | 'network_error';
+  free_daily?: BalanceView;
+  free_week1?: BalanceView;
+  prepaid?: { usage: number; granted: number } | null;
+  error?: string;
+}
+
+const billingApi = {
+  consume: (pages: number): Promise<ConsumeResponse> =>
+    ipcRenderer.invoke('billing:consume', pages),
+  balance: (): Promise<BalanceResponse> => ipcRenderer.invoke('billing:balance'),
+};
+
+export type BillingApi = typeof billingApi;
+
+contextBridge.exposeInMainWorld('billing', billingApi);

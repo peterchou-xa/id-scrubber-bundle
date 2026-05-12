@@ -1,4 +1,4 @@
-import type { GlinerApi, ScrubberApi, DialogApi, IdentifiersApi } from './index';
+import type { GlinerApi, ScrubberApi, DialogApi, IdentifiersApi, BillingApi } from './index';
 
 declare global {
   interface Window {
@@ -6,6 +6,7 @@ declare global {
     scrubber: ScrubberApi;
     dialogApi: DialogApi;
     identifiers: IdentifiersApi;
+    billing: BillingApi;
   }
 }
 

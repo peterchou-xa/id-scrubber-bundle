@@ -1,6 +1,12 @@
 /// <reference types="vite/client" />
 
-import type { GlinerApi, ScrubberApi, DialogApi, IdentifiersApi } from '../../preload/index';
+import type {
+  GlinerApi,
+  ScrubberApi,
+  DialogApi,
+  IdentifiersApi,
+  BillingApi,
+} from '../../preload/index';
 
 declare global {
   interface Window {
@@ -8,6 +14,7 @@ declare global {
     scrubber: ScrubberApi;
     dialogApi: DialogApi;
     identifiers: IdentifiersApi;
+    billing: BillingApi;
   }
 }
 

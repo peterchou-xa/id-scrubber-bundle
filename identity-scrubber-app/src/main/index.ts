@@ -11,6 +11,7 @@ import {
 import { scrubberService, ServeEvent } from './scrubber';
 import { loadIdentifiers, saveIdentifiers } from './identifiersStore';
 import { recordScrubEvent } from './metrics';
+import { consumePages, fetchBalance } from './billing';
 
 let mainWindow: BrowserWindow | null = null;
 let downloadInFlight = false;
@@ -170,6 +171,14 @@ app.whenReady().then(() => {
       }
     },
   );
+
+  ipcMain.handle('billing:consume', async (_evt, pages: number) => {
+    return consumePages(Number(pages));
+  });
+
+  ipcMain.handle('billing:balance', async () => {
+    return fetchBalance();
+  });
 
   ipcMain.handle('shell:openPath', async (_evt, filePath: string) => {
     const err = await shell.openPath(filePath);

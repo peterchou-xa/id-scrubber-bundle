@@ -4,20 +4,29 @@ import path from 'path';
 import { app, net } from 'electron';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
+import { getMachineId, readOrCreateDeviceIdFile } from './deviceId';
 
 export const GLINER_REPO = 'peterchou26/gliner-pii-onnx';
 export const GLINER_MODEL_FILE = 'model_fp16.onnx';
+export const DEVICE_ID_FILE = 'device-id';
 
 // All files that must exist locally for the python serve loop to start.
 // `model_fp16.onnx` references `model_fp16.onnx_data` by relative path, so
 // they MUST live in the same directory.
-const REQUIRED_FILES = [
+//
+// `device-id` is locally generated (not downloaded). Including it in
+// REQUIRED_FILES means deleting it forces a full model re-download, which is
+// the multi-minute penalty that gates the "delete device-id to wipe quota"
+// abuse vector.
+const DOWNLOAD_FILES = [
   'model_fp16.onnx',
   'model_fp16.onnx_data',
   'gliner_config.json',
   'tokenizer.json',
   'tokenizer_config.json',
 ];
+
+const REQUIRED_FILES = [...DOWNLOAD_FILES, DEVICE_ID_FILE];
 
 export type GlinerProgress =
   | { stage: 'checking' }
@@ -66,6 +75,10 @@ export async function isGlinerCached(): Promise<boolean> {
     REQUIRED_FILES.map((f) => fileExistsNonEmpty(path.join(dir, f))),
   );
   return checks.every(Boolean);
+}
+
+export function getDeviceIdFilePath(): string {
+  return path.join(getGlinerModelDir(), DEVICE_ID_FILE);
 }
 
 export async function getGlinerStatus(): Promise<GlinerStatus> {
@@ -163,13 +176,13 @@ export async function ensureGlinerModel(
   // Resolve all sizes up-front so the progress bar can show overall %.
   // For files HF doesn't size via headers (small JSONs), we fall back to 0
   // and just include them in the file count.
-  const sizes = await Promise.all(REQUIRED_FILES.map((f) => headSize(fileUrl(f))));
+  const sizes = await Promise.all(DOWNLOAD_FILES.map((f) => headSize(fileUrl(f))));
   const overallTotal = sizes.reduce((a, b) => a + b, 0);
   onProgress({ stage: 'starting', totalBytes: overallTotal });
 
   let overallReceived = 0;
-  for (let i = 0; i < REQUIRED_FILES.length; i++) {
-    const file = REQUIRED_FILES[i];
+  for (let i = 0; i < DOWNLOAD_FILES.length; i++) {
+    const file = DOWNLOAD_FILES[i];
     const total = sizes[i];
     const dest = path.join(dir, file);
 
@@ -181,7 +194,7 @@ export async function ensureGlinerModel(
         stage: 'downloading',
         file,
         fileIndex: i + 1,
-        fileCount: REQUIRED_FILES.length,
+        fileCount: DOWNLOAD_FILES.length,
         received: total,
         total,
         overallReceived,
@@ -205,7 +218,7 @@ export async function ensureGlinerModel(
         stage: 'downloading',
         file,
         fileIndex: i + 1,
-        fileCount: REQUIRED_FILES.length,
+        fileCount: DOWNLOAD_FILES.length,
         received,
         total,
         overallReceived,
@@ -214,6 +227,11 @@ export async function ensureGlinerModel(
       });
     });
   }
+
+  // Generate the device-id file alongside the model. Source of truth lives in
+  // this file from this moment on; later launches read it rather than
+  // recomputing from machine_id.
+  readOrCreateDeviceIdFile(path.join(dir, DEVICE_ID_FILE), getMachineId());
 
   onProgress({ stage: 'done', dir });
   return dir;

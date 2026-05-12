@@ -141,6 +141,63 @@ const HIGHLIGHT_COLORS = {
 } as const;
 type HighlightColor = keyof typeof HIGHLIGHT_COLORS;
 
+interface QuotaBadgeBalance {
+  free_daily?: { usage: number; granted: number; resets_at?: string };
+  free_week1?: { usage: number; granted: number; expires_at?: string };
+  prepaid?: { usage: number; granted: number } | null;
+}
+
+function QuotaBadge({ balance }: { balance: QuotaBadgeBalance | null }): JSX.Element {
+  if (!balance) {
+    return (
+      <span className="text-xs text-muted-foreground px-2 py-1 rounded-md bg-secondary border border-border">
+        Quota…
+      </span>
+    );
+  }
+  const daily = balance.free_daily;
+  const w1 = balance.free_week1;
+  const prepaid = balance.prepaid;
+  const dailyLeft = daily ? Math.max(0, daily.granted - daily.usage) : 0;
+  const w1Active = !!w1?.expires_at && new Date(w1.expires_at).getTime() > Date.now();
+  const w1Left = w1Active && w1 ? Math.max(0, w1.granted - w1.usage) : 0;
+  const prepaidLeft = prepaid ? Math.max(0, prepaid.granted - prepaid.usage) : 0;
+  const total = dailyLeft + w1Left + prepaidLeft;
+  const empty = total <= 0;
+  return (
+    <div
+      className={
+        'flex items-center gap-2 text-xs px-2.5 py-1 rounded-md border ' +
+        (empty
+          ? 'bg-destructive/10 border-destructive/40 text-destructive'
+          : 'bg-secondary border-border text-foreground')
+      }
+      title={
+        [
+          daily ? `Daily: ${dailyLeft}/${daily.granted}` : null,
+          w1Active && w1 ? `Bonus: ${w1Left}/${w1.granted}` : null,
+          prepaid ? `Prepaid: ${prepaidLeft}/${prepaid.granted}` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      }
+    >
+      <span className="font-medium">{total} pages left</span>
+      <span className="text-muted-foreground">
+        (
+        {[
+          `${dailyLeft} free today`,
+          w1Active && w1 ? `${w1Left} week one bonus` : null,
+          prepaid ? `${prepaidLeft} prepaid` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ')}
+        )
+      </span>
+    </div>
+  );
+}
+
 export function MainScreen(): JSX.Element {
   const [appState, setAppState] = useState<AppState>('empty');
   const [selectedFile, setSelectedFile] = useState<string>('');
@@ -165,6 +222,31 @@ export function MainScreen(): JSX.Element {
   const [identifiersShowErrors, setIdentifiersShowErrors] = useState(false);
   const [identifiersShakeRound, setIdentifiersShakeRound] = useState(0);
   const [identifiersShakeIndices, setIdentifiersShakeIndices] = useState<number[]>([]);
+  const [paywall, setPaywall] = useState<{
+    reason: 'invalid_device' | 'insufficient_balance' | 'network_error';
+    requested: number;
+    free_daily?: { usage: number; granted: number; resets_at?: string };
+    free_week1?: { usage: number; granted: number; expires_at?: string };
+    prepaid?: { usage: number; granted: number } | null;
+    error?: string;
+  } | null>(null);
+
+  const [balance, setBalance] = useState<{
+    free_daily?: { usage: number; granted: number; resets_at?: string };
+    free_week1?: { usage: number; granted: number; expires_at?: string };
+    prepaid?: { usage: number; granted: number } | null;
+  } | null>(null);
+
+  const refreshBalance = async (): Promise<void> => {
+    const r = await window.billing.balance();
+    if (r.ok) {
+      setBalance({ free_daily: r.free_daily, free_week1: r.free_week1, prepaid: r.prepaid });
+    }
+  };
+
+  useEffect(() => {
+    void refreshBalance();
+  }, []);
 
   // Per-scan ("temporary") identifiers — used for the current scan only.
   const [scanIdentifiers, setScanIdentifiers] = useState<Identifier[]>([]);
@@ -431,8 +513,35 @@ export function MainScreen(): JSX.Element {
       acc[p.type] = (acc[p.type] ?? 0) + 1;
       return acc;
     }, {});
+    const pageCount = pages.size;
     setIsScrubbing(true);
     try {
+      // Quota gate. The combined budget across free_daily + free_week1 +
+      // prepaid must cover every page in the PDF — partial scrubs are not
+      // allowed (the design's "all-or-nothing per scrub" rule).
+      if (pageCount > 0) {
+        const quota = await window.billing.consume(pageCount);
+        // Mirror the post-consume state into the header badge regardless of
+        // outcome — consume returns the latest usage/granted for every bucket.
+        if (quota.free_daily || quota.free_week1 || quota.prepaid !== undefined) {
+          setBalance({
+            free_daily: quota.free_daily,
+            free_week1: quota.free_week1,
+            prepaid: quota.prepaid ?? null,
+          });
+        }
+        if (!quota.allow) {
+          setPaywall({
+            reason: quota.reason ?? 'network_error',
+            requested: pageCount,
+            free_daily: quota.free_daily,
+            free_week1: quota.free_week1,
+            prepaid: quota.prepaid ?? null,
+            error: quota.error,
+          });
+          return;
+        }
+      }
       const res = await window.scrubber.scrub(
         selected,
         HIGHLIGHT_COLORS[highlightColor].base,
@@ -555,6 +664,9 @@ export function MainScreen(): JSX.Element {
             <Icon path={ICONS.shield} className="w-4 h-4 text-primary" />
           </div>
           <h1 className="tracking-tight text-base font-semibold">Identity Scrubber</h1>
+          <div className="ml-auto">
+            <QuotaBadge balance={balance} />
+          </div>
         </div>
 
         <div className="flex-1 min-h-0 flex gap-6">
@@ -1175,6 +1287,94 @@ export function MainScreen(): JSX.Element {
                 className="px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 transition-colors cursor-pointer"
               >
                 Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {paywall && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setPaywall(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="w-full max-w-md bg-card border border-border rounded-xl shadow-xl p-5 flex flex-col gap-3"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="font-semibold text-base">
+              {paywall.reason === 'insufficient_balance'
+                ? 'Not enough pages'
+                : paywall.reason === 'invalid_device'
+                  ? 'Device verification failed'
+                  : 'Quota service unavailable'}
+            </h3>
+
+            {paywall.reason === 'insufficient_balance' && (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  This PDF needs {paywall.requested} page(s) but your remaining quota is lower.
+                </p>
+                <div className="text-xs flex flex-col gap-1 bg-secondary rounded-md p-3">
+                  {paywall.free_daily && (
+                    <div className="flex justify-between">
+                      <span>Daily free</span>
+                      <span>
+                        {Math.max(0, paywall.free_daily.granted - paywall.free_daily.usage)} /{' '}
+                        {paywall.free_daily.granted}
+                        {paywall.free_daily.resets_at
+                          ? ` · resets ${new Date(paywall.free_daily.resets_at).toLocaleString()}`
+                          : ''}
+                      </span>
+                    </div>
+                  )}
+                  {paywall.free_week1 && (
+                    <div className="flex justify-between">
+                      <span>First-week bonus</span>
+                      <span>
+                        {paywall.free_week1.expires_at &&
+                        new Date(paywall.free_week1.expires_at).getTime() > Date.now()
+                          ? `${Math.max(0, paywall.free_week1.granted - paywall.free_week1.usage)} / ${paywall.free_week1.granted}`
+                          : 'expired'}
+                      </span>
+                    </div>
+                  )}
+                  {paywall.prepaid && (
+                    <div className="flex justify-between">
+                      <span>Prepaid</span>
+                      <span>
+                        {Math.max(0, paywall.prepaid.granted - paywall.prepaid.usage)} /{' '}
+                        {paywall.prepaid.granted}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {paywall.reason === 'invalid_device' && (
+              <p className="text-sm text-muted-foreground">
+                We couldn't verify this device. Try restarting the app, or contact support if this
+                keeps happening.
+              </p>
+            )}
+
+            {paywall.reason === 'network_error' && (
+              <p className="text-sm text-muted-foreground">
+                Couldn't reach the quota service{paywall.error ? ` (${paywall.error})` : ''}. Check
+                your connection and try again.
+              </p>
+            )}
+
+            <div className="flex justify-end gap-2 mt-2">
+              <button
+                type="button"
+                onClick={() => setPaywall(null)}
+                className="px-4 py-1.5 text-sm font-medium bg-secondary border border-border rounded-md hover:bg-secondary/80 transition-colors cursor-pointer"
+              >
+                Close
               </button>
             </div>
           </div>
