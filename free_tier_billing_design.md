@@ -140,9 +140,9 @@ Request: `{ machine_id, device_id, pages }`
 Performed in this order:
 
 1. **Format validation (always).** Reject if any field is malformed:
-   - `machine_id` must be a non-empty hex string of plausible length (e.g., 32–64 chars).
-   - `device_id` must be a 64-char lowercase hex string.
-   - `pages` must be a positive integer below a sanity cap (e.g., ≤ 10_000).
+   - `machine_id` must match `^[0-9a-f-]{32,64}$` (lowercase hex, allowing hyphens — macOS `IOPlatformUUID` is hyphenated).
+   - `device_id` must be a 64-char lowercase hex string (no hyphens — it's a raw `sha256` output).
+   - `pages` must be a positive integer ≤ `PAGES_SANITY_CAP` (10_000).
 2. **Relational validation (account creation only).** When both `findByMachineId` and `findByDeviceId` miss — i.e., this looks like a new user — recompute the expected `device_id` and require a match:
    ```
    expected = sha256(shuffle(machine_id))
@@ -263,9 +263,12 @@ async function consume(req) {
     prepaid:     prepaid
       ? { usage: prepaid.usage + fromPrepaid, granted: prepaid.granted }
       : null,
+    lease:       currentLeaseSnapshot(account),  // echo; minted only by /balance
   };
 }
 ```
+
+Every `/consume` response echoes the account's current lease snapshot (see the offline-quota design). `/consume` never mints or rotates a lease — that responsibility belongs to `/balance` exclusively. If the account has never had a lease minted (brand-new account, no `/balance` call yet), the `lease` field is omitted.
 
 ### Free daily refill helper
 

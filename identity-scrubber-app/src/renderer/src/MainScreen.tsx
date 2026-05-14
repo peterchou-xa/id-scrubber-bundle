@@ -147,7 +147,11 @@ interface QuotaBadgeBalance {
   prepaid?: { usage: number; granted: number } | null;
 }
 
-function QuotaBadge({ balance }: { balance: QuotaBadgeBalance | null }): JSX.Element {
+function QuotaBadge({
+  balance,
+}: {
+  balance: QuotaBadgeBalance | null;
+}): JSX.Element {
   if (!balance) {
     return (
       <span className="text-xs text-muted-foreground px-2 py-1 rounded-md bg-secondary border border-border">
@@ -223,11 +227,21 @@ export function MainScreen(): JSX.Element {
   const [identifiersShakeRound, setIdentifiersShakeRound] = useState(0);
   const [identifiersShakeIndices, setIdentifiersShakeIndices] = useState<number[]>([]);
   const [paywall, setPaywall] = useState<{
-    reason: 'invalid_device' | 'insufficient_balance' | 'network_error';
+    reason:
+      | 'invalid_device'
+      | 'insufficient_balance'
+      | 'network_error'
+      | 'offline_state_missing'
+      | 'offline_lease_expired'
+      | 'offline_ceiling_reached'
+      | 'offline_unavailable';
     requested: number;
     free_daily?: { usage: number; granted: number; resets_at?: string };
     free_week1?: { usage: number; granted: number; expires_at?: string };
     prepaid?: { usage: number; granted: number } | null;
+    offline_remaining?: number;
+    offline_ceiling?: number;
+    lease_expires_at?: string;
     error?: string;
   } | null>(null);
 
@@ -239,7 +253,7 @@ export function MainScreen(): JSX.Element {
 
   const refreshBalance = async (): Promise<void> => {
     const r = await window.billing.balance();
-    if (r.ok) {
+    if (r.free_daily || r.free_week1 || r.prepaid !== undefined) {
       setBalance({ free_daily: r.free_daily, free_week1: r.free_week1, prepaid: r.prepaid });
     }
   };
@@ -537,6 +551,9 @@ export function MainScreen(): JSX.Element {
             free_daily: quota.free_daily,
             free_week1: quota.free_week1,
             prepaid: quota.prepaid ?? null,
+            offline_remaining: quota.offline_remaining,
+            offline_ceiling: quota.offline_ceiling,
+            lease_expires_at: quota.lease_expires_at,
             error: quota.error,
           });
           return;
@@ -1309,7 +1326,14 @@ export function MainScreen(): JSX.Element {
                 ? 'Not enough pages'
                 : paywall.reason === 'invalid_device'
                   ? 'Device verification failed'
-                  : 'Quota service unavailable'}
+                  : paywall.reason === 'offline_ceiling_reached'
+                    ? 'Offline quota exhausted'
+                    : paywall.reason === 'offline_lease_expired'
+                      ? 'Offline quota expired'
+                      : paywall.reason === 'offline_state_missing' ||
+                          paywall.reason === 'offline_unavailable'
+                        ? 'Offline quota unavailable'
+                        : 'Quota service unavailable'}
             </h3>
 
             {paywall.reason === 'insufficient_balance' && (
@@ -1365,6 +1389,34 @@ export function MainScreen(): JSX.Element {
               <p className="text-sm text-muted-foreground">
                 Couldn't reach the quota service{paywall.error ? ` (${paywall.error})` : ''}. Check
                 your connection and try again.
+              </p>
+            )}
+
+            {paywall.reason === 'offline_ceiling_reached' && (
+              <p className="text-sm text-muted-foreground">
+                You've used all {paywall.offline_ceiling ?? 0} pages of your offline quota. Connect
+                to the internet to continue scrubbing.
+              </p>
+            )}
+
+            {paywall.reason === 'offline_lease_expired' && (
+              <p className="text-sm text-muted-foreground">
+                Your offline quota has expired
+                {paywall.lease_expires_at
+                  ? ` (${new Date(paywall.lease_expires_at).toLocaleString()})`
+                  : ''}
+                . Connect to the internet to continue scrubbing.
+              </p>
+            )}
+
+            {(paywall.reason === 'offline_state_missing' ||
+              paywall.reason === 'offline_unavailable') && (
+              <p className="text-sm text-muted-foreground">
+                Offline scrubbing isn't available right now
+                {paywall.reason === 'offline_state_missing'
+                  ? ' (no local quota cached, or the cache was modified)'
+                  : ''}
+                . Connect to the internet to continue.
               </p>
             )}
 

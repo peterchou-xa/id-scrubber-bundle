@@ -126,22 +126,42 @@ export interface BalanceView {
   expires_at?: string;
 }
 
+export type OfflineConsumeReason =
+  | 'offline_state_missing'
+  | 'offline_lease_expired'
+  | 'offline_ceiling_reached'
+  | 'offline_unavailable';
+
 export interface ConsumeResponse {
   allow: boolean;
-  reason?: 'invalid_device' | 'insufficient_balance' | 'network_error';
+  reason?:
+    | 'invalid_device'
+    | 'insufficient_balance'
+    | 'network_error'
+    | OfflineConsumeReason;
   consumed?: { free_daily: number; free_week1: number; prepaid: number };
   free_daily?: BalanceView;
   free_week1?: BalanceView;
   prepaid?: { usage: number; granted: number } | null;
+  source?: 'online' | 'offline';
+  offline_remaining?: number;
+  offline_ceiling?: number;
+  lease_expires_at?: string;
+  synced_at?: string;
   error?: string;
 }
 
 export interface BalanceResponse {
   ok: boolean;
-  reason?: 'invalid_device' | 'network_error';
+  reason?: 'invalid_device' | 'network_error' | OfflineConsumeReason;
   free_daily?: BalanceView;
   free_week1?: BalanceView;
   prepaid?: { usage: number; granted: number } | null;
+  source?: 'online' | 'offline';
+  offline_remaining?: number;
+  offline_ceiling?: number;
+  lease_expires_at?: string;
+  synced_at?: string;
   error?: string;
 }
 
