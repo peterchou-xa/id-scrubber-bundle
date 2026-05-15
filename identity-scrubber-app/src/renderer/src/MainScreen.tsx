@@ -1,4 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { BuyModal } from './BuyModal';
+import { BillingSettings } from './BillingSettings';
 
 type IdentifierType = 'name' | 'ssn' | 'dob' | 'email' | 'address' | 'other';
 
@@ -257,6 +259,9 @@ export function MainScreen(): JSX.Element {
       setBalance({ free_daily: r.free_daily, free_week1: r.free_week1, prepaid: r.prepaid });
     }
   };
+
+  const [buyOpen, setBuyOpen] = useState(false);
+  const [billingSettingsOpen, setBillingSettingsOpen] = useState(false);
 
   useEffect(() => {
     void refreshBalance();
@@ -681,8 +686,22 @@ export function MainScreen(): JSX.Element {
             <Icon path={ICONS.shield} className="w-4 h-4 text-primary" />
           </div>
           <h1 className="tracking-tight text-base font-semibold">Identity Scrubber</h1>
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-2">
             <QuotaBadge balance={balance} />
+            <button
+              type="button"
+              onClick={() => setBuyOpen(true)}
+              className="text-xs px-2.5 py-1 rounded-md border border-primary/50 bg-primary/10 text-primary hover:bg-primary/20 transition-colors cursor-pointer font-medium"
+            >
+              Buy pages
+            </button>
+            <button
+              type="button"
+              onClick={() => setBillingSettingsOpen(true)}
+              className="text-xs px-2.5 py-1 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-colors cursor-pointer"
+            >
+              Billing
+            </button>
           </div>
         </div>
 
@@ -1421,6 +1440,18 @@ export function MainScreen(): JSX.Element {
             )}
 
             <div className="flex justify-end gap-2 mt-2">
+              {paywall.reason === 'insufficient_balance' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaywall(null);
+                    setBuyOpen(true);
+                  }}
+                  className="px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors cursor-pointer"
+                >
+                  Buy more pages
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setPaywall(null)}
@@ -1432,6 +1463,22 @@ export function MainScreen(): JSX.Element {
           </div>
         </div>
       )}
+
+      <BuyModal
+        open={buyOpen}
+        onClose={() => setBuyOpen(false)}
+        initialPrepaid={balance?.prepaid ?? null}
+        onPrepaidChanged={() => {
+          void refreshBalance();
+        }}
+      />
+
+      <BillingSettings
+        open={billingSettingsOpen}
+        onClose={() => setBillingSettingsOpen(false)}
+        prepaid={balance?.prepaid ?? null}
+        onOpenBuy={() => setBuyOpen(true)}
+      />
     </div>
   );
 }

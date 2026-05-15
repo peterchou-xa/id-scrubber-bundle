@@ -11,7 +11,13 @@ import {
 import { scrubberService, ServeEvent } from './scrubber';
 import { loadIdentifiers, saveIdentifiers } from './identifiersStore';
 import { recordScrubEvent } from './metrics';
-import { consumePages, fetchBalance } from './billing';
+import {
+  consumePages,
+  fetchBalance,
+  startCheckout,
+  fetchLicenseInfo,
+  type Tier,
+} from './billing';
 
 let mainWindow: BrowserWindow | null = null;
 let downloadInFlight = false;
@@ -178,6 +184,14 @@ app.whenReady().then(() => {
 
   ipcMain.handle('billing:balance', async () => {
     return fetchBalance();
+  });
+
+  ipcMain.handle('billing:startCheckout', async (_evt, tier: Tier) => {
+    return startCheckout(tier);
+  });
+
+  ipcMain.handle('billing:licenseInfo', async () => {
+    return fetchLicenseInfo();
   });
 
   ipcMain.handle('shell:openPath', async (_evt, filePath: string) => {

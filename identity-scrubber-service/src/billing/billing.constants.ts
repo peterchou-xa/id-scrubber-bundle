@@ -7,8 +7,16 @@ export const SKUS = {
 export const TIER_PAGES: Record<string, number> = {
   starter: 100,
   pro: 500,
-  power: 2000,
+  max: 2000,
 };
+
+export const TIER_PRICE_CENTS: Record<string, number> = {
+  starter: 900,
+  pro: 1900,
+  max: 4900,
+};
+
+export type Tier = 'starter' | 'pro' | 'max';
 
 export const FREE_WEEK1_PAGES = 20;
 export const FREE_DAILY_PAGES = 1;

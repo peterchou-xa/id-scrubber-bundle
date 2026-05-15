@@ -17,6 +17,8 @@ import {
   OFFLINE_CAP,
   PAGES_SANITY_CAP,
   SKUS,
+  TIER_PAGES,
+  type Tier,
 } from './billing.constants';
 
 interface AccountRow {
@@ -193,6 +195,75 @@ export class BillingService {
         prepaid: balances.prepaidView,
         lease,
       };
+    });
+  }
+
+  // Resolve (machine_id, device_id) -> account UUID, creating the row if this
+  // is the first time we've seen this device. Used by checkout-url and
+  // license-info — same trust model as /consume.
+  async resolveAccountId(machineId: string, deviceId: string): Promise<string | null> {
+    const m = (machineId ?? '').toLowerCase();
+    const d = (deviceId ?? '').toLowerCase();
+    assertValidMachineId(m);
+    assertValidDeviceId(d);
+    return this.ds.transaction(async (tx) => {
+      const acct = await this.findOrCreateAccount(tx, m, d);
+      return acct ? acct.id : null;
+    });
+  }
+
+  async getLicenseKey(accountId: string): Promise<string | null> {
+    const rows: { license_key: string | null }[] = await this.ds.query(
+      `SELECT license_key FROM accounts WHERE id = $1 LIMIT 1`,
+      [accountId],
+    );
+    return rows[0]?.license_key ?? null;
+  }
+
+  // Webhook-only grant path. Idempotent on ls_order_id; first-time inserts a
+  // prepaid balance row, subsequent grants add to granted. Records license_key
+  // on the account if not already set.
+  async grantPrepaid(params: {
+    accountId: string;
+    tier: Tier;
+    lsOrderId: string;
+    amountCents: number;
+    licenseKey: string | null;
+  }): Promise<{ granted: boolean }> {
+    const { accountId, tier, lsOrderId, amountCents, licenseKey } = params;
+    const pages = TIER_PAGES[tier];
+    if (!pages) throw new BadRequestException(`unknown tier: ${tier}`);
+
+    return this.ds.transaction(async (tx) => {
+      try {
+        await tx.query(
+          `INSERT INTO purchases (account_id, sku, tier, quota_total, amount_cents, ls_order_id, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, now())`,
+          [accountId, SKUS.prepaid, tier, pages, amountCents, lsOrderId],
+        );
+      } catch (e) {
+        const msg = (e as Error).message ?? '';
+        if (msg.includes('purchases_ls_order_id_key') || msg.includes('duplicate key')) {
+          return { granted: false };
+        }
+        throw e;
+      }
+
+      await tx.query(
+        `INSERT INTO balances (account_id, sku, usage, granted, period_start, period_end)
+         VALUES ($1, $2, 0, $3, NULL, NULL)
+         ON CONFLICT (account_id, sku)
+         DO UPDATE SET granted = balances.granted + EXCLUDED.granted`,
+        [accountId, SKUS.prepaid, pages],
+      );
+
+      if (licenseKey) {
+        await tx.query(
+          `UPDATE accounts SET license_key = $1 WHERE id = $2 AND license_key IS NULL`,
+          [licenseKey, accountId],
+        );
+      }
+      return { granted: true };
     });
   }
 

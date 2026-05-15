@@ -165,10 +165,27 @@ export interface BalanceResponse {
   error?: string;
 }
 
+export type Tier = 'starter' | 'pro' | 'max';
+
+export interface StartCheckoutResult {
+  ok: boolean;
+  url?: string;
+  test_mode?: boolean;
+  error?: string;
+}
+
+export interface LicenseInfo {
+  license_key: string | null;
+  error?: string;
+}
+
 const billingApi = {
   consume: (pages: number): Promise<ConsumeResponse> =>
     ipcRenderer.invoke('billing:consume', pages),
   balance: (): Promise<BalanceResponse> => ipcRenderer.invoke('billing:balance'),
+  startCheckout: (tier: Tier): Promise<StartCheckoutResult> =>
+    ipcRenderer.invoke('billing:startCheckout', tier),
+  getLicenseInfo: (): Promise<LicenseInfo> => ipcRenderer.invoke('billing:licenseInfo'),
 };
 
 export type BillingApi = typeof billingApi;

@@ -1,13 +1,31 @@
 import fs from 'fs';
 import path from 'path';
-import { app, safeStorage } from 'electron';
+import { app, safeStorage, shell } from 'electron';
 import { getDeviceIdFilePath } from './gliner';
 import { computeDeviceId, getMachineId } from './deviceId';
 
+const SERVICE_BASE =
+  process.env.IDSCRUB_SERVICE_URL ?? 'http://localhost:3030/api';
 const CONSUME_URL =
-  process.env.IDSCRUB_CONSUME_URL ?? 'http://localhost:3030/api/consume';
+  process.env.IDSCRUB_CONSUME_URL ?? `${SERVICE_BASE}/consume`;
 const BALANCE_URL =
-  process.env.IDSCRUB_BALANCE_URL ?? 'http://localhost:3030/api/balance';
+  process.env.IDSCRUB_BALANCE_URL ?? `${SERVICE_BASE}/balance`;
+const CHECKOUT_URL = `${SERVICE_BASE}/checkout-url`;
+const LICENSE_INFO_URL = `${SERVICE_BASE}/license-info`;
+
+export type Tier = 'starter' | 'pro' | 'max';
+
+export interface StartCheckoutResult {
+  ok: boolean;
+  url?: string;
+  test_mode?: boolean;
+  error?: string;
+}
+
+export interface LicenseInfo {
+  license_key: string | null;
+  error?: string;
+}
 
 export interface BalanceView {
   usage: number;
@@ -222,6 +240,47 @@ export async function fetchBalance(): Promise<BalanceResponse> {
     return { ...parsed, source: 'online' };
   } catch (err) {
     return offlineBalanceView((err as Error).message);
+  }
+}
+
+export async function startCheckout(tier: Tier): Promise<StartCheckoutResult> {
+  if (tier !== 'starter' && tier !== 'pro' && tier !== 'max') {
+    return { ok: false, error: 'invalid tier' };
+  }
+  try {
+    const res = await fetch(CHECKOUT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        machine_id: getMachineId(),
+        device_id: readDeviceId(),
+        tier,
+      }),
+    });
+    if (!res.ok) {
+      return { ok: false, error: `${res.status} ${res.statusText}` };
+    }
+    const parsed = (await res.json()) as { url?: string; test_mode?: boolean };
+    if (!parsed.url) return { ok: false, error: 'no url returned' };
+    await shell.openExternal(parsed.url);
+    return { ok: true, url: parsed.url, test_mode: !!parsed.test_mode };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+export async function fetchLicenseInfo(): Promise<LicenseInfo> {
+  const params = new URLSearchParams({
+    machine_id: getMachineId(),
+    device_id: readDeviceId(),
+  });
+  try {
+    const res = await fetch(`${LICENSE_INFO_URL}?${params.toString()}`);
+    if (!res.ok) return { license_key: null, error: `${res.status} ${res.statusText}` };
+    const parsed = (await res.json()) as { license_key: string | null };
+    return { license_key: parsed.license_key ?? null };
+  } catch (err) {
+    return { license_key: null, error: (err as Error).message };
   }
 }
 
