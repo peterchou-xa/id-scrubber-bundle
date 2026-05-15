@@ -1,5 +1,5 @@
 const METRICS_URL =
-  process.env.IDSCRUB_METRICS_URL ?? 'http://localhost:3030/api/scrub-metrics/events';
+  process.env.IDSCRUB_METRICS_URL ?? 'http://localhost:3030/api/metrics/scrub-events';
 
 export interface ScrubMetricEvent {
   count: number;

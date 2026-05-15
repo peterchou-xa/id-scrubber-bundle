@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { ScrubMetricsModule } from './scrub-metrics/scrub-metrics.module';
+import { MetricsModule } from './metrics/metrics.module';
 import { BillingModule } from './billing/billing.module';
 
 @Module({
@@ -18,7 +18,7 @@ import { BillingModule } from './billing/billing.module';
       autoLoadEntities: true,
       synchronize: false,
     }),
-    ScrubMetricsModule,
+    MetricsModule,
     BillingModule,
   ],
   controllers: [AppController],

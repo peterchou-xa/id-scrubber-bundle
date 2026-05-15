@@ -16,7 +16,7 @@ export interface HourlyTypeRow {
 }
 
 @Injectable()
-export class ScrubMetricsService {
+export class MetricsService {
   constructor(@InjectDataSource() private readonly ds: DataSource) {}
 
   async record(event: ScrubEventDto): Promise<void> {
@@ -68,7 +68,7 @@ export class ScrubMetricsService {
     return { totalScrubbed, totalsByType, totalRuns };
   }
 
-  async getHourly(hours = 24): Promise<HourlyTypeRow[]> {
+  async getHistory(hours = 24): Promise<HourlyTypeRow[]> {
     const rows = await this.ds.query<Array<{ hour: Date; pii_type: string; count: string }>>(
       `SELECT hour, pii_type, count
        FROM scrub_metrics_hourly

@@ -128,9 +128,9 @@ pm2 delete identity-scrubber-service    # remove from pm2
 | Method | Path                         | Purpose                                       |
 | ------ | ---------------------------- | --------------------------------------------- |
 | GET    | `/api/health`                | Liveness check                                |
-| POST   | `/api/scrub-metrics/events`  | Record a scrub: `{ count, byType, clientId? }` |
-| GET    | `/api/scrub-metrics/summary` | Lifetime totals (count, by type, runs)        |
-| GET    | `/api/scrub-metrics/hourly`  | Per-hour breakdown, `?hours=N` (default 24)   |
+| POST   | `/api/metrics/scrub-events`  | Record a scrub: `{ count, byType, clientId? }` |
+| GET    | `/api/metrics/scrub-summary` | Lifetime totals (count, by type, runs)        |
+| GET    | `/api/metrics/scrub-history` | Per-hour breakdown, `?hours=N` (default 24)   |
 
 ## Schema
 

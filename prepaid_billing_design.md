@@ -120,6 +120,18 @@ The `account_id` in `custom_data` is the bridge from "browser session that just 
 
 A naive `GET /checkout-url?account_id=<uuid>` would let any caller pass any UUID and get back a checkout URL that grants pages to that account. Doing the resolution server-side from `(machine_id, device_id)` means the grant is always attached to the account that actually owns those IDs — same trust model as `/consume`. Format-validate `machine_id` and `device_id` here too, identical to the `/consume` checks.
 
+### Why route through the server for the checkout URL at all
+
+A reasonable alternative is "renderer builds the LS URL directly with `machine_id` + `device_id` in `custom_data`, webhook does find-or-create on receipt." Technically viable — the webhook is already the trusted grant path (HMAC-verified, idempotent), and `/consume`-style find-or-create works equally well from the webhook side. We still route through the server because:
+
+1. **LS API key stays server-side.** Creating checkout sessions via LS's API requires `LS_API_KEY`, which can't ship in the Electron binary. The renderer-only alternative commits us to LS *static buy links* — workable, but no per-session config and no server-side validation.
+2. **Tier → variant_id mapping lives server-side.** Variant IDs change when LS products are reconfigured (test/live, renames). Server-side mapping means we can swap variants without an app release. Baking them into the renderer reintroduces a server round-trip just to fetch the mapping anyway.
+3. **Single source of truth for identity resolution.** `/consume` already owns `(machine_id, device_id) → account_id` find-or-create. Putting the same logic in the webhook works but duplicates it; `/checkout-url` funnels purchase intent through the same path.
+4. **Tier validation before the user pays.** Server rejects unknown/retired tiers up front. With renderer-built URLs, a bad tier surfaces only when a confused customer reports it.
+5. **Natural choke point for telemetry / rate limiting.** Logging purchase intent, per-machine rate limits, or blocking known-bad accounts all live here without needing a new endpoint.
+
+None of these are showstoppers individually — static buy links with client-set `custom_data` plus a find-or-create webhook would work. The trade is: one extra HTTP call now buys flexibility to change variants/tiers/pricing without re-shipping the app.
+
 ### Why the redirect doesn't grant
 
 LS's thank-you page redirect happens in the user's browser, not inside Electron, so we have no native callback to trust. Even if we deep-linked back into the app, the user could fabricate that deep link. The webhook is server-to-server with an HMAC, so it's the only grant path. The redirect URL is just UX — "your purchase is being processed, return to the app."
