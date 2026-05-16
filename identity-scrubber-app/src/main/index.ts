@@ -14,8 +14,8 @@ import { recordScrubEvent } from './metrics';
 import {
   consumePages,
   fetchBalance,
+  redeemLicenseKey,
   startCheckout,
-  fetchLicenseInfo,
   type Tier,
 } from './billing';
 
@@ -190,8 +190,8 @@ app.whenReady().then(() => {
     return startCheckout(tier);
   });
 
-  ipcMain.handle('billing:licenseInfo', async () => {
-    return fetchLicenseInfo();
+  ipcMain.handle('billing:redeemLicenseKey', async (_evt, key: string) => {
+    return redeemLicenseKey(key);
   });
 
   ipcMain.handle('shell:openPath', async (_evt, filePath: string) => {

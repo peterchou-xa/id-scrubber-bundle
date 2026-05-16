@@ -199,8 +199,8 @@ export class BillingService {
   }
 
   // Resolve (machine_id, device_id) -> account UUID, creating the row if this
-  // is the first time we've seen this device. Used by checkout-url and
-  // license-info — same trust model as /consume.
+  // is the first time we've seen this device. Used by checkout-url — same
+  // trust model as /consume.
   async resolveAccountId(machineId: string, deviceId: string): Promise<string | null> {
     const m = (machineId ?? '').toLowerCase();
     const d = (deviceId ?? '').toLowerCase();
@@ -212,25 +212,16 @@ export class BillingService {
     });
   }
 
-  async getLicenseKey(accountId: string): Promise<string | null> {
-    const rows: { license_key: string | null }[] = await this.ds.query(
-      `SELECT license_key FROM accounts WHERE id = $1 LIMIT 1`,
-      [accountId],
-    );
-    return rows[0]?.license_key ?? null;
-  }
-
   // Webhook-only grant path. Idempotent on ls_order_id; first-time inserts a
-  // prepaid balance row, subsequent grants add to granted. Records license_key
-  // on the account if not already set.
+  // prepaid balance row, subsequent grants add to granted. The license_key
+  // column is populated separately by license_key_created or manual redeem.
   async grantPrepaid(params: {
     accountId: string;
     tier: Tier;
     lsOrderId: string;
     amountCents: number;
-    licenseKey: string | null;
-  }): Promise<{ granted: boolean }> {
-    const { accountId, tier, lsOrderId, amountCents, licenseKey } = params;
+  }): Promise<{ granted: boolean; pagesAdded: number }> {
+    const { accountId, tier, lsOrderId, amountCents } = params;
     const pages = TIER_PAGES[tier];
     if (!pages) throw new BadRequestException(`unknown tier: ${tier}`);
 
@@ -244,7 +235,7 @@ export class BillingService {
       } catch (e) {
         const msg = (e as Error).message ?? '';
         if (msg.includes('purchases_ls_order_id_key') || msg.includes('duplicate key')) {
-          return { granted: false };
+          return { granted: false, pagesAdded: 0 };
         }
         throw e;
       }
@@ -257,14 +248,44 @@ export class BillingService {
         [accountId, SKUS.prepaid, pages],
       );
 
-      if (licenseKey) {
-        await tx.query(
-          `UPDATE accounts SET license_key = $1 WHERE id = $2 AND license_key IS NULL`,
-          [licenseKey, accountId],
-        );
-      }
-      return { granted: true };
+      return { granted: true, pagesAdded: pages };
     });
+  }
+
+  // Idempotent: only writes when the row exists and license_key is still null,
+  // so a late license_key_created after an earlier redeem (or vice versa) is
+  // a no-op. Returns true iff a row was updated.
+  async setLicenseKeyForOrder(lsOrderId: string, licenseKey: string): Promise<boolean> {
+    const r = await this.ds.query(
+      `UPDATE purchases SET license_key = $1
+         WHERE ls_order_id = $2 AND license_key IS NULL`,
+      [licenseKey, lsOrderId],
+    );
+    // pg driver returns [rows, count] for UPDATE
+    const count = Array.isArray(r) && r.length >= 2 ? Number(r[1]) : 0;
+    return count > 0;
+  }
+
+  async findPurchaseByLicenseKey(
+    licenseKey: string,
+  ): Promise<{ account_id: string; ls_order_id: string } | null> {
+    const rows: { account_id: string; ls_order_id: string }[] = await this.ds.query(
+      `SELECT account_id, ls_order_id FROM purchases WHERE license_key = $1 LIMIT 1`,
+      [licenseKey],
+    );
+    return rows[0] ?? null;
+  }
+
+  async getPrepaidView(
+    accountId: string,
+  ): Promise<{ usage: number; granted: number } | null> {
+    const rows: BalanceRow[] = await this.ds.query(
+      `SELECT * FROM balances WHERE account_id = $1 AND sku = $2 LIMIT 1`,
+      [accountId, SKUS.prepaid],
+    );
+    const r = rows[0];
+    if (!r) return null;
+    return { usage: n(r.usage), granted: n(r.granted) };
   }
 
   // ---------------------------------------------------------------------------

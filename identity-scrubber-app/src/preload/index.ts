@@ -174,8 +174,22 @@ export interface StartCheckoutResult {
   error?: string;
 }
 
-export interface LicenseInfo {
-  license_key: string | null;
+export type RedeemStatus =
+  | 'ok'
+  | 'invalid_input'
+  | 'no_account'
+  | 'invalid_key'
+  | 'key_belongs_to_other_account'
+  | 'already_applied'
+  | 'rate_limited'
+  | 'validate_unavailable'
+  | 'network_error';
+
+export interface RedeemResult {
+  ok: boolean;
+  status: RedeemStatus;
+  prepaid?: { usage: number; granted: number } | null;
+  pages_added?: number;
   error?: string;
 }
 
@@ -185,7 +199,8 @@ const billingApi = {
   balance: (): Promise<BalanceResponse> => ipcRenderer.invoke('billing:balance'),
   startCheckout: (tier: Tier): Promise<StartCheckoutResult> =>
     ipcRenderer.invoke('billing:startCheckout', tier),
-  getLicenseInfo: (): Promise<LicenseInfo> => ipcRenderer.invoke('billing:licenseInfo'),
+  redeemLicenseKey: (key: string): Promise<RedeemResult> =>
+    ipcRenderer.invoke('billing:redeemLicenseKey', key),
 };
 
 export type BillingApi = typeof billingApi;

@@ -1,5 +1,5 @@
 import { JSX, useEffect, useState } from 'react';
-import type { Tier } from '../../preload/index';
+import type { RedeemStatus, Tier } from '../../preload/index';
 
 type Phase =
   | { kind: 'choose' }
@@ -41,6 +41,93 @@ function prepaidRemaining(p: PrepaidView | null | undefined): number {
   return Math.max(0, p.granted - p.usage);
 }
 
+const REDEEM_MESSAGES: Record<RedeemStatus, string> = {
+  ok: 'License redeemed.',
+  invalid_input: 'Please paste your license key.',
+  no_account:
+    "We don't have a record for this device yet. Try opening a PDF first, then redeem.",
+  invalid_key:
+    "We couldn't verify that license key. If you just purchased, wait a minute and try again — otherwise, double-check the key.",
+  key_belongs_to_other_account: 'This key belongs to another account.',
+  already_applied: 'This license has already been applied to your account.',
+  rate_limited: 'Too many attempts — please wait a moment before retrying.',
+  validate_unavailable:
+    "Couldn't reach Lemon Squeezy to verify the key. Try again shortly.",
+  network_error: "Couldn't reach the billing service. Check your connection.",
+};
+
+function RedeemSection({
+  onRedeemed,
+}: {
+  onRedeemed: () => void;
+}): JSX.Element {
+  const [key, setKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<RedeemStatus | null>(null);
+  const [pagesAdded, setPagesAdded] = useState<number | null>(null);
+
+  const submit = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setStatus(null);
+    setPagesAdded(null);
+    const r = await window.billing.redeemLicenseKey(key);
+    setStatus(r.status);
+    if (r.ok) {
+      // Server is authoritative about how many pages this redeem actually
+      // granted (0 for an already-bound key, full tier pages for a fresh
+      // grant). Snapshot diffing on the client was racy.
+      setPagesAdded(r.pages_added ?? 0);
+      setKey('');
+      // Always refresh the parent's balance — even on an already-bound
+      // no-op, the badge may have been stale beforehand.
+      onRedeemed();
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="pt-3 mt-1 border-t border-border flex flex-col gap-2">
+      <label className="text-xs font-medium text-muted-foreground">
+        Already purchased? Redeem your license key
+      </label>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder="XXXX-XXXX-XXXX-XXXX"
+          autoComplete="off"
+          spellCheck={false}
+          disabled={busy}
+          className="flex-1 px-3 py-1.5 text-sm font-mono bg-background border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-primary/40"
+        />
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={busy || !key.trim()}
+          className="px-3 py-1.5 text-sm font-medium bg-secondary rounded-md hover:bg-secondary/80 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {busy ? 'Redeeming…' : 'Redeem'}
+        </button>
+      </div>
+      {status && (() => {
+        const tone =
+          status === 'ok'
+            ? 'text-green-600'
+            : status === 'already_applied' || status === 'key_belongs_to_other_account'
+              ? 'text-red-600'
+              : 'text-muted-foreground';
+        const text =
+          status === 'ok' && pagesAdded != null && pagesAdded > 0
+            ? `License redeemed — ${pagesAdded.toLocaleString()} pages added.`
+            : REDEEM_MESSAGES[status];
+        return <p className={'text-xs ' + tone}>{text}</p>;
+      })()}
+    </div>
+  );
+}
+
 export function BuyModal({
   open,
   onClose,
@@ -53,12 +140,12 @@ export function BuyModal({
   onPrepaidChanged: () => void;
 }): JSX.Element | null {
   const [phase, setPhase] = useState<Phase>({ kind: 'choose' });
-  const [selectedTier, setSelectedTier] = useState<Tier>('pro');
+  const [selectedTier, setSelectedTier] = useState<Tier>('starter');
 
   useEffect(() => {
     if (!open) return;
     setPhase({ kind: 'choose' });
-    setSelectedTier('pro');
+    setSelectedTier('starter');
   }, [open]);
 
   useEffect(() => {
@@ -148,6 +235,7 @@ export function BuyModal({
               Checkout opens in your browser. Pages appear here automatically once
               Lemon Squeezy confirms the purchase.
             </p>
+            <RedeemSection onRedeemed={onPrepaidChanged} />
             <div className="flex justify-end gap-2">
               <button
                 type="button"

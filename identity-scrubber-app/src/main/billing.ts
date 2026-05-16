@@ -11,7 +11,7 @@ const CONSUME_URL =
 const BALANCE_URL =
   process.env.IDSCRUB_BALANCE_URL ?? `${SERVICE_BASE}/balance`;
 const CHECKOUT_URL = `${SERVICE_BASE}/checkout-url`;
-const LICENSE_INFO_URL = `${SERVICE_BASE}/license-info`;
+const REDEEM_URL = `${SERVICE_BASE}/redeem-license-key`;
 
 export type Tier = 'starter' | 'pro' | 'max';
 
@@ -22,8 +22,22 @@ export interface StartCheckoutResult {
   error?: string;
 }
 
-export interface LicenseInfo {
-  license_key: string | null;
+export type RedeemStatus =
+  | 'ok'
+  | 'invalid_input'
+  | 'no_account'
+  | 'invalid_key'
+  | 'key_belongs_to_other_account'
+  | 'already_applied'
+  | 'rate_limited'
+  | 'validate_unavailable'
+  | 'network_error';
+
+export interface RedeemResult {
+  ok: boolean;
+  status: RedeemStatus;
+  prepaid?: { usage: number; granted: number } | null;
+  pages_added?: number;
   error?: string;
 }
 
@@ -269,18 +283,59 @@ export async function startCheckout(tier: Tier): Promise<StartCheckoutResult> {
   }
 }
 
-export async function fetchLicenseInfo(): Promise<LicenseInfo> {
-  const params = new URLSearchParams({
-    machine_id: getMachineId(),
-    device_id: readDeviceId(),
-  });
+// Maps the redeem endpoint's response codes to a status enum the renderer
+// can switch on for user-visible messages. Network/parse errors collapse
+// to 'network_error' the same way the rest of billing.ts handles them.
+function mapRedeemStatus(httpStatus: number, errorBody: unknown): RedeemStatus {
+  const message =
+    typeof errorBody === 'object' && errorBody && 'message' in errorBody
+      ? String((errorBody as { message: unknown }).message)
+      : '';
+  if (httpStatus === 200) return 'ok';
+  if (httpStatus === 400 && message.includes('no_account')) return 'no_account';
+  if (httpStatus === 400) return 'invalid_input';
+  if (httpStatus === 403 && message.includes('key_belongs_to_other_account')) {
+    return 'key_belongs_to_other_account';
+  }
+  if (httpStatus === 403) return 'invalid_key';
+  if (httpStatus === 409 && message.includes('already_applied')) return 'already_applied';
+  if (httpStatus === 429) return 'rate_limited';
+  if (httpStatus === 503) return 'validate_unavailable';
+  return 'network_error';
+}
+
+export async function redeemLicenseKey(licenseKey: string): Promise<RedeemResult> {
+  const trimmed = typeof licenseKey === 'string' ? licenseKey.trim() : '';
+  if (!trimmed) {
+    return { ok: false, status: 'invalid_input', error: 'empty license key' };
+  }
   try {
-    const res = await fetch(`${LICENSE_INFO_URL}?${params.toString()}`);
-    if (!res.ok) return { license_key: null, error: `${res.status} ${res.statusText}` };
-    const parsed = (await res.json()) as { license_key: string | null };
-    return { license_key: parsed.license_key ?? null };
+    const res = await fetch(REDEEM_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        license_key: trimmed,
+        machine_id: getMachineId(),
+        device_id: readDeviceId(),
+      }),
+    });
+    const body = (await res.json().catch(() => ({}))) as {
+      message?: string;
+      prepaid?: { usage: number; granted: number } | null;
+      pages_added?: number;
+    };
+    const status = mapRedeemStatus(res.status, body);
+    if (status === 'ok') {
+      return {
+        ok: true,
+        status: 'ok',
+        prepaid: body.prepaid ?? null,
+        pages_added: Number(body.pages_added ?? 0),
+      };
+    }
+    return { ok: false, status, error: body.message };
   } catch (err) {
-    return { license_key: null, error: (err as Error).message };
+    return { ok: false, status: 'network_error', error: (err as Error).message };
   }
 }
 

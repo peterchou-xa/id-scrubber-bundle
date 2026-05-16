@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { BuyModal } from './BuyModal';
-import { BillingSettings } from './BillingSettings';
 
 type IdentifierType = 'name' | 'ssn' | 'dob' | 'email' | 'address' | 'other';
 
@@ -151,8 +150,10 @@ interface QuotaBadgeBalance {
 
 function QuotaBadge({
   balance,
+  onBuy,
 }: {
   balance: QuotaBadgeBalance | null;
+  onBuy: () => void;
 }): JSX.Element {
   if (!balance) {
     return (
@@ -200,6 +201,15 @@ function QuotaBadge({
           .join(' · ')}
         )
       </span>
+      <button
+        type="button"
+        onClick={onBuy}
+        title="Buy more pages"
+        aria-label="Buy more pages"
+        className="ml-1 -mr-0.5 flex items-center justify-center w-4 h-4 rounded-full bg-primary/15 text-primary border border-primary/30 hover:bg-primary/25 transition-colors cursor-pointer"
+      >
+        <Icon path={ICONS.plus} className="w-2.5 h-2.5" />
+      </button>
     </div>
   );
 }
@@ -261,7 +271,6 @@ export function MainScreen(): JSX.Element {
   };
 
   const [buyOpen, setBuyOpen] = useState(false);
-  const [billingSettingsOpen, setBillingSettingsOpen] = useState(false);
 
   useEffect(() => {
     void refreshBalance();
@@ -687,21 +696,7 @@ export function MainScreen(): JSX.Element {
           </div>
           <h1 className="tracking-tight text-base font-semibold">Identity Scrubber</h1>
           <div className="ml-auto flex items-center gap-2">
-            <QuotaBadge balance={balance} />
-            <button
-              type="button"
-              onClick={() => setBuyOpen(true)}
-              className="text-xs px-2.5 py-1 rounded-md border border-primary/50 bg-primary/10 text-primary hover:bg-primary/20 transition-colors cursor-pointer font-medium"
-            >
-              Buy pages
-            </button>
-            <button
-              type="button"
-              onClick={() => setBillingSettingsOpen(true)}
-              className="text-xs px-2.5 py-1 rounded-md border border-border bg-secondary hover:bg-secondary/80 transition-colors cursor-pointer"
-            >
-              Billing
-            </button>
+            <QuotaBadge balance={balance} onBuy={() => setBuyOpen(true)} />
           </div>
         </div>
 
@@ -1471,13 +1466,6 @@ export function MainScreen(): JSX.Element {
         onPrepaidChanged={() => {
           void refreshBalance();
         }}
-      />
-
-      <BillingSettings
-        open={billingSettingsOpen}
-        onClose={() => setBillingSettingsOpen(false)}
-        prepaid={balance?.prepaid ?? null}
-        onOpenBuy={() => setBuyOpen(true)}
       />
     </div>
   );
