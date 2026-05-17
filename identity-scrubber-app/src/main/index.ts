@@ -182,8 +182,8 @@ app.whenReady().then(() => {
     return consumePages(Number(pages));
   });
 
-  ipcMain.handle('billing:balance', async () => {
-    return fetchBalance();
+  ipcMain.handle('billing:balance', async (_evt, opts?: { includeLicenses?: boolean }) => {
+    return fetchBalance(opts);
   });
 
   ipcMain.handle('billing:startCheckout', async (_evt, tier: Tier) => {

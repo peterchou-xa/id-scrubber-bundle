@@ -93,6 +93,16 @@ export interface ConsumeResponse {
   error?: string;
 }
 
+export interface LicenseView {
+  id: number;
+  sku: string;
+  tier: string | null;
+  quota_total: number;
+  amount_cents: number | null;
+  ls_order_id: string | null;
+  created_at: string;
+}
+
 export interface BalanceResponse {
   ok: boolean;
   reason?: 'invalid_device' | 'network_error' | OfflineConsumeReason;
@@ -104,6 +114,7 @@ export interface BalanceResponse {
   offline_ceiling?: number;
   lease_expires_at?: string;
   synced_at?: string;
+  licenses?: LicenseView[];
   error?: string;
 }
 
@@ -228,13 +239,16 @@ function readDeviceId(): string {
 // Network calls
 // ---------------------------------------------------------------------------
 
-export async function fetchBalance(): Promise<BalanceResponse> {
+export async function fetchBalance(
+  opts?: { includeLicenses?: boolean },
+): Promise<BalanceResponse> {
   const body: Record<string, unknown> = {
     machine_id: getMachineId(),
     device_id: readDeviceId(),
   };
   const offline = pendingOfflineLeasePayload();
   if (offline) body.offline_lease = offline;
+  if (opts?.includeLicenses) body.include_licenses = true;
 
   try {
     const res = await fetch(BALANCE_URL, {

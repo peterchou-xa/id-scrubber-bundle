@@ -38,6 +38,17 @@ export interface BalanceQueryDto {
   machine_id: string;
   device_id: string;
   offline_lease?: OfflineLeaseReport;
+  include_licenses?: boolean;
+}
+
+export interface LicenseView {
+  id: number;
+  sku: string;
+  tier: string | null;
+  quota_total: number;
+  amount_cents: number | null;
+  ls_order_id: string | null;
+  created_at: string;
 }
 
 export interface BalanceResponse {
@@ -47,4 +58,5 @@ export interface BalanceResponse {
   free_week1?: BalanceView;
   prepaid?: { usage: number; granted: number } | null;
   lease?: Lease;
+  licenses?: LicenseView[];
 }

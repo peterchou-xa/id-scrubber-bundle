@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { BuyModal } from './BuyModal';
+import type { RedeemStatus } from '../../preload/index';
 
 type IdentifierType = 'name' | 'ssn' | 'dob' | 'email' | 'address' | 'other';
 
@@ -148,12 +149,24 @@ interface QuotaBadgeBalance {
   prepaid?: { usage: number; granted: number } | null;
 }
 
+interface LicenseView {
+  id: number;
+  sku: string;
+  tier: string | null;
+  quota_total: number;
+  amount_cents: number | null;
+  ls_order_id: string | null;
+  created_at: string;
+}
+
 function QuotaBadge({
   balance,
   onBuy,
+  onShowDetails,
 }: {
   balance: QuotaBadgeBalance | null;
   onBuy: () => void;
+  onShowDetails: () => void;
 }): JSX.Element {
   if (!balance) {
     return (
@@ -168,6 +181,7 @@ function QuotaBadge({
   const dailyLeft = daily ? Math.max(0, daily.granted - daily.usage) : 0;
   const w1Active = !!w1?.expires_at && new Date(w1.expires_at).getTime() > Date.now();
   const w1Left = w1Active && w1 ? Math.max(0, w1.granted - w1.usage) : 0;
+  const showW1 = w1Active && !!w1 && w1Left > 0;
   const prepaidLeft = prepaid ? Math.max(0, prepaid.granted - prepaid.usage) : 0;
   const total = dailyLeft + w1Left + prepaidLeft;
   const empty = total <= 0;
@@ -182,25 +196,33 @@ function QuotaBadge({
       title={
         [
           daily ? `Daily: ${dailyLeft}/${daily.granted}` : null,
-          w1Active && w1 ? `Bonus: ${w1Left}/${w1.granted}` : null,
+          showW1 && w1 ? `Bonus: ${w1Left}/${w1.granted}` : null,
           prepaid ? `Prepaid: ${prepaidLeft}/${prepaid.granted}` : null,
         ]
           .filter(Boolean)
           .join(' · ')
       }
     >
-      <span className="font-medium">{total} pages left</span>
-      <span className="text-muted-foreground">
-        (
-        {[
-          `${dailyLeft} free today`,
-          w1Active && w1 ? `${w1Left} week one bonus` : null,
-          prepaid ? `${prepaidLeft} prepaid` : null,
-        ]
-          .filter(Boolean)
-          .join(' · ')}
-        )
-      </span>
+      <button
+        type="button"
+        onClick={onShowDetails}
+        title="Show balance details"
+        aria-label="Show balance details"
+        className="flex items-center gap-2 cursor-pointer rounded -my-1 -mx-1 py-1 px-1 hover:bg-foreground/5 focus:outline-none transition-colors"
+      >
+        <span className="font-medium">{total} pages left</span>
+        <span className="text-muted-foreground">
+          (
+          {[
+            `${dailyLeft} free today`,
+            showW1 && w1 ? `${w1Left} week one bonus` : null,
+            prepaid ? `${prepaidLeft} prepaid` : null,
+          ]
+            .filter(Boolean)
+            .join(' · ')}
+          )
+        </span>
+      </button>
       <button
         type="button"
         onClick={onBuy}
@@ -210,6 +232,305 @@ function QuotaBadge({
       >
         <Icon path={ICONS.plus} className="w-2.5 h-2.5" />
       </button>
+    </div>
+  );
+}
+
+function formatTier(tier: string | null): string {
+  if (!tier) return 'Prepaid';
+  return tier.charAt(0).toUpperCase() + tier.slice(1);
+}
+
+function formatDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString([], {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+// Compact acquired stamp: "May 16   2:30 AM" — drops the year and seconds,
+// and pads the gap between date and time with spaces so that, when rendered
+// in a monospace font with `whitespace-pre`, every row's date sits flush
+// left and its time sits flush right within a fixed character width.
+// Width budget: 6 chars for "MMM DD" + 8 chars for "HH:MM AM" + filler.
+const ACQUIRED_WIDTH = 15;
+
+function formatAcquired(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const date = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const gap = Math.max(1, ACQUIRED_WIDTH - date.length - time.length);
+  return date + ' '.repeat(gap) + time;
+}
+
+const REDEEM_MESSAGES: Record<RedeemStatus, string> = {
+  ok: 'License redeemed.',
+  invalid_input: 'Please paste your license key.',
+  no_account:
+    "We don't have a record for this device yet. Try opening a PDF first, then redeem.",
+  invalid_key:
+    "We couldn't verify that license key. If you just purchased, wait a minute and try again — otherwise, double-check the key.",
+  key_belongs_to_other_account: 'This key belongs to another account.',
+  already_applied: 'This license has already been applied to your account.',
+  rate_limited: 'Too many attempts — please wait a moment before retrying.',
+  validate_unavailable:
+    "Couldn't reach Lemon Squeezy to verify the key. Try again shortly.",
+  network_error: "Couldn't reach the billing service. Check your connection.",
+};
+
+function RedeemSection({
+  onRedeemed,
+}: {
+  onRedeemed: () => void;
+}): JSX.Element {
+  const [key, setKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<RedeemStatus | null>(null);
+  const [pagesAdded, setPagesAdded] = useState<number | null>(null);
+
+  const submit = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setStatus(null);
+    setPagesAdded(null);
+    const r = await window.billing.redeemLicenseKey(key);
+    setStatus(r.status);
+    if (r.ok) {
+      // Server is authoritative about how many pages this redeem actually
+      // granted (0 for an already-bound key, full tier pages for a fresh
+      // grant). Snapshot diffing on the client was racy.
+      setPagesAdded(r.pages_added ?? 0);
+      setKey('');
+      // Always refresh the parent's balance — even on an already-bound
+      // no-op, the badge may have been stale beforehand.
+      onRedeemed();
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="pt-3 mt-1 border-t border-border flex flex-col gap-2">
+      <label className="text-xs font-medium text-muted-foreground">
+        Don't see your order above? Redeem it with the license key from your receipt email
+      </label>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+          autoComplete="off"
+          spellCheck={false}
+          disabled={busy}
+          className="flex-1 px-3 py-2 text-sm font-mono bg-secondary border border-border rounded-md outline-none focus:border-primary/50 focus:bg-card transition-colors placeholder:text-xs placeholder:text-muted-foreground/40"
+        />
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={busy || !key.trim()}
+          className="px-3 py-1.5 text-sm font-medium bg-secondary rounded-md hover:bg-secondary/80 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {busy ? 'Redeeming…' : 'Redeem'}
+        </button>
+      </div>
+      {status && (() => {
+        const tone =
+          status === 'ok'
+            ? 'text-green-600'
+            : status === 'already_applied' || status === 'key_belongs_to_other_account'
+              ? 'text-red-600'
+              : 'text-muted-foreground';
+        const text =
+          status === 'ok' && pagesAdded != null && pagesAdded > 0
+            ? `License redeemed — ${pagesAdded.toLocaleString()} pages added.`
+            : REDEEM_MESSAGES[status];
+        return <p className={'text-xs ' + tone}>{text}</p>;
+      })()}
+    </div>
+  );
+}
+
+function BalanceDetailsModal({
+  open,
+  onClose,
+  balance,
+  licenses,
+  loading,
+  error,
+  onRedeemed,
+}: {
+  open: boolean;
+  onClose: () => void;
+  balance: QuotaBadgeBalance | null;
+  licenses: LicenseView[] | null;
+  loading: boolean;
+  error: string | null;
+  onRedeemed: () => void;
+}): JSX.Element | null {
+  if (!open) return null;
+
+  const daily = balance?.free_daily;
+  const w1 = balance?.free_week1;
+  const prepaid = balance?.prepaid ?? null;
+  const dailyLeft = daily ? Math.max(0, daily.granted - daily.usage) : 0;
+  const w1Active = !!w1?.expires_at && new Date(w1.expires_at).getTime() > Date.now();
+  const w1Left = w1Active && w1 ? Math.max(0, w1.granted - w1.usage) : 0;
+  // Once the week-one bonus is expired or drained it never comes back, so
+  // hide its tile entirely rather than showing a permanent "0 / 20" stub.
+  const showW1 = w1Active && w1Left > 0;
+  const prepaidLeft = prepaid ? Math.max(0, prepaid.granted - prepaid.usage) : 0;
+  const totalLeft = dailyLeft + w1Left + prepaidLeft;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="w-full max-w-lg bg-card border border-border rounded-xl shadow-xl p-5 flex flex-col gap-4 max-h-[85vh]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="font-semibold text-base">Quota details</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {totalLeft} pages left across all buckets
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="text-muted-foreground hover:text-foreground cursor-pointer"
+          >
+            <Icon path={ICONS.x} className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+            Balance
+          </div>
+          <div className={'grid gap-2 ' + (showW1 ? 'grid-cols-3' : 'grid-cols-2')}>
+            <div className="rounded-lg border border-border bg-secondary px-3 py-2">
+              <div className="text-[11px] text-muted-foreground">Free today</div>
+              <div className="text-sm font-semibold">
+                {dailyLeft}
+                {daily ? <span className="text-muted-foreground font-normal"> / {daily.granted}</span> : null}
+              </div>
+              {daily?.resets_at && (
+                <div className="text-[11px] text-muted-foreground mt-0.5">
+                  resets {formatDateTime(daily.resets_at)}
+                </div>
+              )}
+            </div>
+            {showW1 && w1 && (
+              <div className="rounded-lg border border-border bg-secondary px-3 py-2">
+                <div className="text-[11px] text-muted-foreground">First-week bonus</div>
+                <div className="text-sm font-semibold">
+                  {w1Left}
+                  <span className="text-muted-foreground font-normal"> / {w1.granted}</span>
+                </div>
+                {w1.expires_at && (
+                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                    expires {formatDateTime(w1.expires_at)}
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="rounded-lg border border-border bg-secondary px-3 py-2">
+              <div className="text-[11px] text-muted-foreground">Prepaid</div>
+              <div className="text-sm font-semibold">
+                {prepaidLeft}
+                {prepaid ? <span className="text-muted-foreground font-normal"> / {prepaid.granted}</span> : null}
+              </div>
+              {!prepaid && (
+                <div className="text-[11px] text-muted-foreground mt-0.5">no prepaid pages yet</div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2 min-h-0">
+          <div className="flex items-baseline justify-between gap-2">
+            <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              Purchased licenses
+            </div>
+            <div className="text-[11px] text-muted-foreground">
+              Showing the 10 most recent
+            </div>
+          </div>
+          {loading && !licenses && (
+            <div className="text-sm text-muted-foreground">Loading licenses…</div>
+          )}
+          {error && (
+            <div className="text-sm text-destructive">
+              Couldn't load licenses ({error}). The list is only available online.
+            </div>
+          )}
+          {licenses && licenses.length === 0 && !loading && (
+            <div className="text-sm text-muted-foreground">
+              No purchases yet. Use the “+” next to the badge to buy pages.
+            </div>
+          )}
+          {licenses && licenses.length > 0 && (
+            <div className="overflow-auto rounded-lg border border-border max-h-72">
+              <table className="w-full text-xs">
+                <thead className="bg-secondary text-muted-foreground sticky top-0 z-10 shadow-[0_1px_0_0_var(--border)]">
+                  <tr>
+                    <th className="text-left font-medium px-3 py-2">Type</th>
+                    <th className="text-right font-medium px-3 py-2">Order</th>
+                    <th className="text-right font-medium px-3 py-2">Pages</th>
+                    <th className="text-right font-medium px-3 py-2">Price</th>
+                    <th className="text-right font-medium px-3 py-2">Acquired</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {licenses.map((lic) => {
+                    const acquired = formatAcquired(lic.created_at);
+                    return (
+                      <tr key={lic.id} className="border-t border-border">
+                        <td className="px-3 py-2 font-medium text-foreground capitalize">
+                          {formatTier(lic.tier)}
+                        </td>
+                        <td
+                          className="px-3 py-2 text-right text-muted-foreground font-mono tabular-nums"
+                          title={lic.ls_order_id ? `Order #${lic.ls_order_id}` : undefined}
+                        >
+                          {lic.ls_order_id ? `#${lic.ls_order_id}` : '—'}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {lic.quota_total.toLocaleString()}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                          {lic.amount_cents == null
+                            ? '—'
+                            : `$${(lic.amount_cents / 100).toFixed(
+                                lic.amount_cents % 100 === 0 ? 0 : 2,
+                              )}`}
+                        </td>
+                        <td className="px-3 py-2 text-right text-muted-foreground whitespace-pre font-mono">
+                          {acquired}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <RedeemSection onRedeemed={onRedeemed} />
+      </div>
     </div>
   );
 }
@@ -271,6 +592,28 @@ export function MainScreen(): JSX.Element {
   };
 
   const [buyOpen, setBuyOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [licenses, setLicenses] = useState<LicenseView[] | null>(null);
+  const [licensesLoading, setLicensesLoading] = useState(false);
+  const [licensesError, setLicensesError] = useState<string | null>(null);
+
+  const openDetails = async (): Promise<void> => {
+    setDetailsOpen(true);
+    setLicensesLoading(true);
+    setLicensesError(null);
+    const r = await window.billing.balance({ includeLicenses: true });
+    if (r.free_daily || r.free_week1 || r.prepaid !== undefined) {
+      setBalance({ free_daily: r.free_daily, free_week1: r.free_week1, prepaid: r.prepaid });
+    }
+    if (r.licenses) {
+      setLicenses(r.licenses);
+    } else if (!r.ok) {
+      setLicensesError(r.error ?? r.reason ?? 'offline');
+    } else {
+      setLicenses([]);
+    }
+    setLicensesLoading(false);
+  };
 
   useEffect(() => {
     void refreshBalance();
@@ -696,7 +1039,11 @@ export function MainScreen(): JSX.Element {
           </div>
           <h1 className="tracking-tight text-base font-semibold">Identity Scrubber</h1>
           <div className="ml-auto flex items-center gap-2">
-            <QuotaBadge balance={balance} onBuy={() => setBuyOpen(true)} />
+            <QuotaBadge
+              balance={balance}
+              onBuy={() => setBuyOpen(true)}
+              onShowDetails={() => void openDetails()}
+            />
           </div>
         </div>
 
@@ -1465,6 +1812,18 @@ export function MainScreen(): JSX.Element {
         initialPrepaid={balance?.prepaid ?? null}
         onPrepaidChanged={() => {
           void refreshBalance();
+        }}
+      />
+
+      <BalanceDetailsModal
+        open={detailsOpen}
+        onClose={() => setDetailsOpen(false)}
+        balance={balance}
+        licenses={licenses}
+        loading={licensesLoading}
+        error={licensesError}
+        onRedeemed={() => {
+          void openDetails();
         }}
       />
     </div>

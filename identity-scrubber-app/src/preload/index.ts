@@ -151,6 +151,16 @@ export interface ConsumeResponse {
   error?: string;
 }
 
+export interface LicenseView {
+  id: number;
+  sku: string;
+  tier: string | null;
+  quota_total: number;
+  amount_cents: number | null;
+  ls_order_id: string | null;
+  created_at: string;
+}
+
 export interface BalanceResponse {
   ok: boolean;
   reason?: 'invalid_device' | 'network_error' | OfflineConsumeReason;
@@ -162,6 +172,7 @@ export interface BalanceResponse {
   offline_ceiling?: number;
   lease_expires_at?: string;
   synced_at?: string;
+  licenses?: LicenseView[];
   error?: string;
 }
 
@@ -196,7 +207,8 @@ export interface RedeemResult {
 const billingApi = {
   consume: (pages: number): Promise<ConsumeResponse> =>
     ipcRenderer.invoke('billing:consume', pages),
-  balance: (): Promise<BalanceResponse> => ipcRenderer.invoke('billing:balance'),
+  balance: (opts?: { includeLicenses?: boolean }): Promise<BalanceResponse> =>
+    ipcRenderer.invoke('billing:balance', opts),
   startCheckout: (tier: Tier): Promise<StartCheckoutResult> =>
     ipcRenderer.invoke('billing:startCheckout', tier),
   redeemLicenseKey: (key: string): Promise<RedeemResult> =>

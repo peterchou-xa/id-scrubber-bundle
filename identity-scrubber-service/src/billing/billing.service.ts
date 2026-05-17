@@ -7,6 +7,7 @@ import type {
   ConsumeDto,
   ConsumeResponse,
   Lease,
+  LicenseView,
   OfflineLeaseReport,
 } from './dto/consume.dto';
 import { computeDeviceId } from './device-id';
@@ -187,6 +188,9 @@ export class BillingService {
       const totalAvailable =
         balances.dailyRemaining + balances.w1Remaining + balances.prepaidRemaining;
       const lease = await this.mintLeaseIfNeeded(tx, acct, totalAvailable);
+      const licenses = req?.include_licenses
+        ? await this.readLicenses(tx, acct.id)
+        : undefined;
 
       return {
         ok: true,
@@ -194,8 +198,48 @@ export class BillingService {
         free_week1: balances.w1View,
         prepaid: balances.prepaidView,
         lease,
+        licenses,
       };
     });
+  }
+
+  // Most recent prepaid purchases for this account, newest first, capped at 10.
+  // Excludes free buckets (free_daily / free_week1) and the
+  // 'offline_reconcile' bookkeeping rows — only real purchased licenses.
+  private async readLicenses(
+    tx: EntityManager,
+    accountId: string,
+  ): Promise<LicenseView[]> {
+    const rows: Array<{
+      id: number | string;
+      sku: string;
+      tier: string | null;
+      quota_total: number | string;
+      amount_cents: number | string | null;
+      ls_order_id: string | null;
+      created_at: Date;
+    }> = await tx.query(
+      `SELECT id, sku, tier, quota_total, amount_cents, ls_order_id, created_at
+         FROM purchases
+        WHERE account_id = $1 AND sku = $2
+        ORDER BY created_at DESC, id DESC
+        LIMIT 10`,
+      [accountId, SKUS.prepaid],
+    );
+    return rows.map((r) => ({
+      id: typeof r.id === 'number' ? r.id : Number(r.id),
+      sku: r.sku,
+      tier: r.tier,
+      quota_total: n(r.quota_total),
+      amount_cents:
+        r.amount_cents == null
+          ? null
+          : typeof r.amount_cents === 'number'
+            ? r.amount_cents
+            : Number(r.amount_cents),
+      ls_order_id: r.ls_order_id,
+      created_at: new Date(r.created_at).toISOString(),
+    }));
   }
 
   // Resolve (machine_id, device_id) -> account UUID, creating the row if this
