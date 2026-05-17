@@ -348,7 +348,31 @@ def _run_ocr_scrub(args, input_pdf: str, output_pdf: str, *, do_scrub: bool) -> 
 
 
 def _emit(obj: dict) -> None:
-    """Write one NDJSON line to stdout and flush immediately."""
+    """Write one NDJSON line to stdout and flush immediately.
+
+    Wire protocol (stdout = NDJSON, one object per line; stderr = human logs):
+
+      Server lifecycle:
+        {"status": "ready"}                                     # serve loop ready
+        {"status": "error", "message": "..."}                   # protocol-level error
+
+      Phase/status events — bracket each command (started → in_progress* → done|error):
+        detect:
+          {"cmd":"detect","phase":"ocr",    "status":"started"}
+          {"cmd":"detect","phase":"ocr",    "status":"in_progress","page":i,"total":N}
+          {"cmd":"detect","phase":"ocr",    "status":"done","pages":N}
+          {"cmd":"detect","phase":"analyze","status":"in_progress","chunk":i,"total":N}
+          {"cmd":"detect","phase":"analyze","status":"done","total_pii":N,"pii":[...]}
+          {"cmd":"detect","status":"error","message":"...","traceback":"..."}
+        scrub:
+          {"cmd":"scrub", "phase":"redact","status":"in_progress","bboxes":N,"pages":N}
+          {"cmd":"scrub", "phase":"redact","status":"done","output":"...","redacted":bool}
+          {"cmd":"scrub", "status":"error","message":"...","traceback":"..."}
+
+      Streaming item events (interleaved between phase events, kind discriminates):
+        {"cmd":"detect","kind":"page","page_num":i,"image_path":"...","image_width":W,"image_height":H}
+        {"cmd":"detect","kind":"pii","item":{"type":"<category>","value":"..."}}
+    """
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
@@ -623,12 +647,31 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
 
     print(f"[detect] OCR-ing {path} at {ocr_dpi} DPI (images → {image_dir})...", file=sys.stderr)
     emit({"cmd": "detect", "phase": "ocr", "status": "started"})
+    pages: list = []
     try:
-        pages = ocr_scrub.ocr_pdf(
+        for p in ocr_scrub.ocr_pdf(
             path,
             dpi=ocr_dpi,
             image_output_dir=image_dir,
-        )
+        ):
+            pages.append(p)
+            emit({
+                "cmd": "detect",
+                "phase": "ocr",
+                "status": "in_progress",
+                "page": p.page_num,
+                "total": p.total_pages,
+            })
+            # Stream the rendered page so the UI can display it while
+            # remaining pages are still OCR'ing.
+            emit({
+                "cmd": "detect",
+                "kind": "page",
+                "page_num": p.page_num,
+                "image_path": p.image_path,
+                "image_width": p.image_width,
+                "image_height": p.image_height,
+            })
     except Exception as exc:
         tb = traceback.format_exc()
         print(tb, file=sys.stderr)
@@ -642,18 +685,6 @@ def _serve_detect(req: dict, state: dict, defaults: argparse.Namespace, emit=_em
         return
 
     emit({"cmd": "detect", "phase": "ocr", "status": "done", "pages": len(pages)})
-
-    # Tell the client about each rendered page so it can start displaying
-    # them while the LLM chunks through the text.
-    for p in pages:
-        emit({
-            "cmd": "detect",
-            "kind": "page",
-            "page_num": p.page_num,
-            "image_path": p.image_path,
-            "image_width": p.image_width,
-            "image_height": p.image_height,
-        })
 
     if model != _GLINER_MODEL_NAME:
         emit({

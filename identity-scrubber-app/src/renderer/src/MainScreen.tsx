@@ -80,12 +80,18 @@ interface PIIItem {
 }
 
 type DetectStatus =
-  | { phase: 'ocr' }
+  | { phase: 'ocr'; page?: number; total?: number }
   | { phase: 'analyze'; chunk: number; total: number };
 
 function statusText(s: DetectStatus | null): string {
   if (!s) return 'Analyzing document for PII…';
-  if (s.phase === 'ocr') return 'Reading text from the PDF…';
+  if (s.phase === 'ocr') {
+    if (typeof s.page === 'number' && typeof s.total === 'number' && s.total > 0) {
+      const pct = Math.round((s.page / s.total) * 100);
+      return `Reading text from the PDF (${pct}%)…`;
+    }
+    return 'Reading text from the PDF…';
+  }
   const pct = s.total > 0 ? Math.round((s.chunk / s.total) * 100) : 0;
   return `Detecting PII (${pct}%)…`;
 }
@@ -816,6 +822,12 @@ export function MainScreen(): JSX.Element {
         });
       } else if (evt.phase === 'ocr' && evt.status === 'started') {
         setDetectStatus({ phase: 'ocr' });
+      } else if (evt.phase === 'ocr' && evt.status === 'in_progress') {
+        const page = evt.page as number | undefined;
+        const total = evt.total as number | undefined;
+        if (typeof page === 'number' && typeof total === 'number') {
+          setDetectStatus({ phase: 'ocr', page, total });
+        }
       } else if (evt.phase === 'analyze' && evt.status === 'in_progress') {
         const chunk = evt.chunk as number | undefined;
         const total = evt.total as number | undefined;

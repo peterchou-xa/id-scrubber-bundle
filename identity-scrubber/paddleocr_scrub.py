@@ -2,7 +2,7 @@
 paddleocr_scrub.py — OCR-driven PDF redaction using PaddleOCR.
 
 Public surface:
-  - ocr_pdf(pdf_path, dpi, image_output_dir) -> list[PageOcr]
+  - ocr_pdf(pdf_path, dpi, image_output_dir) -> Iterator[PageOcr]
   - find_pii_bboxes_by_value(page_ocr, pii_values) -> dict[str, list[bbox]]
   - find_pii_bboxes(page_ocr, pii_values) -> list[bbox]
   - build_indexed_full_text(pages) -> (str, list[IndexedSpan])
@@ -71,6 +71,7 @@ class OcrSpan:
 @dataclass
 class PageOcr:
     page_num: int
+    total_pages: int
     words: list[OcrSpan]
     text: str
     page_width: float
@@ -150,17 +151,18 @@ def ocr_pdf(
     pdf_path: str,
     dpi: int = DEFAULT_DPI,
     image_output_dir: str | None = None,
-) -> list[PageOcr]:
-    """Render each page and OCR with PaddleOCR. Bboxes in PDF user-space points."""
+):
+    """Render each page and OCR with PaddleOCR, yielding one PageOcr per page
+    so callers can stream progress. Bboxes in PDF user-space points."""
     import numpy as np
 
     engine = _get_engine()
     pdf = pdfium.PdfDocument(pdf_path)
-    pages: list[PageOcr] = []
+    total_pages = len(pdf)
 
     scale = dpi / 72.0
 
-    for page_idx in range(len(pdf)):
+    for page_idx in range(total_pages):
         page = pdf[page_idx]
         bitmap = page.render(scale=scale)
         img = bitmap.to_pil()
@@ -220,8 +222,9 @@ def ocr_pdf(
         lines = _cluster_lines(spans)
         ordered = [s for line in lines for s in line]
 
-        pages.append(PageOcr(
+        yield PageOcr(
             page_num=page_idx + 1,
+            total_pages=total_pages,
             words=ordered,
             text=_reconstruct_text(lines),
             page_width=page_width_pt,
@@ -230,9 +233,7 @@ def ocr_pdf(
             image_path=image_path,
             image_width=img.width,
             image_height=img_h,
-        ))
-
-    return pages
+        )
 
 
 # ── String-match PII → bbox (ollama / custom-pii path) ───────────────
