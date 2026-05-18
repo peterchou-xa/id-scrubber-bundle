@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Identity Scrubber</title>
+    <meta name="description" content="Identity Scrubber — detect and redact identities from PDFs locally on your machine." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['DM Sans', 'ui-sans-serif', 'system-ui', '-apple-system', 'sans-serif'],
+                    },
+                    colors: {
+                        background: '#fafafa',
+                        foreground: '#1a1a1a',
+                        card: '#ffffff',
+                        primary: {
+                            DEFAULT: '#dc2626',
+                            foreground: '#ffffff',
+                        },
+                        secondary: '#f5f5f5',
+                        muted: {
+                            DEFAULT: '#f5f5f5',
+                            foreground: '#737373',
+                        },
+                        border: 'rgba(220, 38, 38, 0.15)',
+                    },
+                    borderRadius: {
+                        lg: '0.5rem',
+                    },
+                },
+            },
+        };
+    </script>
+    <style>
+        html, body { font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif; }
+    </style>
+</head>
+<body class="min-h-screen bg-background text-foreground antialiased">
+    <div class="flex flex-col min-h-screen">
+        <header class="border-b border-border bg-card/60 backdrop-blur">
+            <div class="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                    <div class="w-7 h-7 rounded-md bg-primary/10 border border-primary/30 flex items-center justify-center">
+                        <svg class="w-4 h-4 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                        </svg>
+                    </div>
+                    <span class="font-semibold tracking-tight">Identity Scrubber</span>
+                </div>
+                <nav class="hidden sm:flex items-center gap-6 text-sm text-muted-foreground">
+                    <a href="#how" class="hover:text-foreground transition-colors">How it works</a>
+                    <a href="#pricing" class="hover:text-foreground transition-colors">Pricing</a>
+                    <a href="#download" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors">
+                        Download
+                    </a>
+                </nav>
+            </div>
+        </header>
+
+        <main class="flex-1">
+            <section class="max-w-7xl mx-auto px-6 pt-20 pb-16">
+                <div class="grid md:grid-cols-[7fr_5fr] gap-10 md:gap-12 items-center">
+                <div class="text-center md:text-left">
+                <h1 class="text-3xl sm:text-4xl lg:text-5xl font-bold tracking-tight leading-[1.1]">
+                    Redact identities from PDFs,<br />
+                    <span class="text-primary">right on your desktop.</span>
+                </h1>
+                </div>
+                <ul class="flex flex-col gap-3 text-left text-base sm:text-lg">
+                    <li class="flex items-start gap-3">
+                        <span class="flex-shrink-0 mt-1 w-5 h-5 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center">
+                            <svg class="w-3 h-3 text-primary" viewBox="-1 -1 26 26" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M17.5 19H9a6 6 0 0 1-1.2-11.88"/><path d="M10.5 5.5A6 6 0 0 1 21 9a4 4 0 0 1 .6 7.6"/></svg>
+                        </span>
+                        <span><span class="font-semibold">No uploads, no cloud, no login.</span> <span class="text-muted-foreground">Your documents never leave your machine.</span></span>
+                    </li>
+                    <li class="flex items-start gap-3">
+                        <span class="flex-shrink-0 mt-1 w-5 h-5 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center">
+                            <svg class="w-3 h-3 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                        </span>
+                        <span><span class="font-semibold">Preview &amp; pick.</span> <span class="text-muted-foreground">Review every detection, add your own identifiers.</span></span>
+                    </li>
+                    <li class="flex items-start gap-3">
+                        <span class="flex-shrink-0 mt-1 w-5 h-5 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center">
+                            <svg class="w-3 h-3 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                        </span>
+                        <span><span class="font-semibold">On-device detection.</span> <span class="text-muted-foreground">Names, SSNs, DOBs, emails, addresses, phones, and more.</span></span>
+                    </li>
+                    <li class="flex items-start gap-3">
+                        <span class="flex-shrink-0 mt-1 w-5 h-5 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center">
+                            <svg class="w-3 h-3 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                        </span>
+                        <span><span class="font-semibold">Free to start.</span> <span class="text-muted-foreground">Daily free quota, extra bonus in week 1, prepaid licenses for more.</span></span>
+                    </li>
+                </ul>
+                </div>
+            </section>
+
+            <section id="how" class="bg-secondary border-y border-border pt-10 pb-16">
+                <div class="max-w-4xl mx-auto px-6">
+                <h2 class="text-2xl sm:text-3xl font-bold tracking-tight text-center">How it works</h2>
+
+                <div
+                    id="how-slider"
+                    class="mt-8 relative rounded-lg border border-border bg-card overflow-hidden select-none"
+                >
+                    <div
+                        id="how-track"
+                        class="flex transition-transform duration-300 ease-out cursor-grab active:cursor-grabbing"
+                        style="transform: translateX(0%);"
+                    >
+                        <!-- Slide 1 -->
+                        <div class="w-full flex-shrink-0 p-5 sm:p-8">
+                            <div class="flex gap-4 items-start">
+                                <span class="flex-shrink-0 w-7 h-7 rounded-full bg-primary text-primary-foreground font-semibold text-sm flex items-center justify-center">1</span>
+                                <div class="flex-1">
+                                    <h3 class="font-semibold">Drop in a PDF</h3>
+                                    <p class="text-sm text-muted-foreground mt-0.5">
+                                        Open the desktop app and select any PDF — scanned or native.
+                                    </p>
+                                </div>
+                            </div>
+                            <div class="mt-5 rounded-md border border-border bg-secondary overflow-hidden h-72 sm:h-96 flex items-center justify-center">
+                                <img class="max-h-full max-w-full w-auto h-auto object-contain" src="res/screenshot_drop.png" alt="Drop in a PDF" draggable="false" />
+                            </div>
+                        </div>
+
+                        <!-- Slide 2 -->
+                        <div class="w-full flex-shrink-0 p-5 sm:p-8">
+                            <div class="flex gap-4 items-start">
+                                <span class="flex-shrink-0 w-7 h-7 rounded-full bg-primary text-primary-foreground font-semibold text-sm flex items-center justify-center">2</span>
+                                <div class="flex-1">
+                                    <h3 class="font-semibold">Detect</h3>
+                                    <p class="text-sm text-muted-foreground mt-0.5">
+                                        Pages are OCR'd and run through the PII model. You'll see each
+                                        detection highlighted on the page.
+                                    </p>
+                                </div>
+                            </div>
+                            <div class="mt-5 rounded-md border border-border bg-secondary overflow-hidden h-72 sm:h-96 flex items-center justify-center">
+                                <img class="max-h-full max-w-full w-auto h-auto object-contain" src="res/screenshot_detection.png" alt="Detect PII" draggable="false" />
+                            </div>
+                        </div>
+
+                        <!-- Slide 3 -->
+                        <div class="w-full flex-shrink-0 p-5 sm:p-8">
+                            <div class="flex gap-4 items-start">
+                                <span class="flex-shrink-0 w-7 h-7 rounded-full bg-primary text-primary-foreground font-semibold text-sm flex items-center justify-center">3</span>
+                                <div class="flex-1">
+                                    <h3 class="font-semibold">Scrub &amp; save</h3>
+                                    <p class="text-sm text-muted-foreground mt-0.5">
+                                        Pick which items to redact, then export a clean PDF with the
+                                        sensitive regions blacked out.
+                                    </p>
+                                </div>
+                            </div>
+                            <div class="mt-5 rounded-md border border-border bg-secondary overflow-hidden h-72 sm:h-96 flex items-center justify-center">
+                                <img class="max-h-full max-w-full w-auto h-auto object-contain" src="res/screenshot_scrub.png" alt="Scrub and save" draggable="false" />
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Prev / Next arrows -->
+                    <button
+                        type="button"
+                        id="how-prev"
+                        aria-label="Previous step"
+                        class="absolute left-2 sm:left-3 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-card/90 border border-border shadow-sm flex items-center justify-center text-foreground hover:bg-card disabled:opacity-30 disabled:cursor-not-allowed transition"
+                    >
+                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                    </button>
+                    <button
+                        type="button"
+                        id="how-next"
+                        aria-label="Next step"
+                        class="absolute right-2 sm:right-3 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-card/90 border border-border shadow-sm flex items-center justify-center text-foreground hover:bg-card disabled:opacity-30 disabled:cursor-not-allowed transition"
+                    >
+                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                    </button>
+                </div>
+
+                <!-- Dots -->
+                <div id="how-dots" class="mt-5 flex items-center justify-center gap-2">
+                    <button type="button" data-idx="0" aria-label="Go to step 1" class="how-dot w-2.5 h-2.5 rounded-full bg-primary transition"></button>
+                    <button type="button" data-idx="1" aria-label="Go to step 2" class="how-dot w-2.5 h-2.5 rounded-full bg-muted-foreground/30 transition"></button>
+                    <button type="button" data-idx="2" aria-label="Go to step 3" class="how-dot w-2.5 h-2.5 rounded-full bg-muted-foreground/30 transition"></button>
+                </div>
+                </div>
+            </section>
+
+            <section id="pricing" class="max-w-5xl mx-auto px-6 pt-20 pb-8">
+                <h2 class="text-2xl sm:text-3xl font-bold tracking-tight text-center">Pricing</h2>
+                <p class="mt-2 text-center text-muted-foreground">
+                    Free daily quota to start. Buy a prepaid pack for more pages.
+                </p>
+
+                <div class="mt-10 grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div class="flex flex-col items-start gap-2 w-full px-5 py-5 rounded-lg border-2 border-border bg-secondary">
+                        <div class="font-medium capitalize">Free</div>
+                        <div class="text-2xl font-semibold">$0</div>
+                        <div class="text-xs text-muted-foreground">1 page per day</div>
+                        <div class="text-xs text-muted-foreground">+20 bonus pages in week 1</div>
+                    </div>
+                    <div class="flex flex-col items-start gap-2 w-full px-5 py-5 rounded-lg border-2 border-border bg-secondary">
+                        <div class="font-medium capitalize">Starter</div>
+                        <div class="text-2xl font-semibold">$9</div>
+                        <div class="text-xs text-muted-foreground">100 pages</div>
+                    </div>
+                    <div class="flex flex-col items-start gap-2 w-full px-5 py-5 rounded-lg border-2 border-primary bg-primary/10 ring-2 ring-primary/30 relative">
+                        <span class="absolute -top-2 right-3 text-[10px] font-semibold uppercase tracking-wide bg-primary text-primary-foreground px-2 py-0.5 rounded">Best value</span>
+                        <div class="font-medium capitalize">Pro</div>
+                        <div class="text-2xl font-semibold">$19</div>
+                        <div class="text-xs text-muted-foreground">500 pages</div>
+                    </div>
+                    <div class="flex flex-col items-start gap-2 w-full px-5 py-5 rounded-lg border-2 border-border bg-secondary">
+                        <div class="font-medium capitalize">Max</div>
+                        <div class="text-2xl font-semibold">$49</div>
+                        <div class="text-xs text-muted-foreground">2,000 pages</div>
+                    </div>
+                </div>
+
+                <p class="mt-6 text-center text-xs text-muted-foreground">
+                    Checkout is handled by Lemon Squeezy. Pages appear in the app automatically once payment is confirmed.
+                </p>
+            </section>
+
+            <section id="download" class="max-w-3xl mx-auto px-6 pt-12 pb-24 text-center">
+                <div class="rounded-lg border border-border bg-card p-8">
+                    <h2 class="text-2xl sm:text-3xl font-bold tracking-tight">Get Identity Scrubber</h2>
+                    <p class="mt-2 text-muted-foreground">
+                        Free tier with a daily quota. Buy a prepaid license for more pages.
+                    </p>
+                    <div class="mt-6 flex flex-wrap items-center justify-center gap-3">
+                        <a href="#" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors shadow-sm">
+                            Download for macOS
+                        </a>
+                        <span class="text-xs text-muted-foreground">Windows &amp; Linux coming soon</span>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="border-t border-border bg-card/60">
+            <div class="max-w-6xl mx-auto px-6 py-6 flex flex-col sm:flex-row items-center justify-between gap-2 text-sm text-muted-foreground">
+                <div>&copy; <span id="year"></span> Identity Scrubber. All rights reserved.</div>
+                <div class="flex items-center gap-4">
+                    <a href="privacy.html" class="hover:text-foreground transition-colors">Privacy</a>
+                    <a href="mailto:support@identityscrubber.com" class="hover:text-foreground transition-colors">Support</a>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        document.getElementById('year').textContent = new Date().getFullYear();
+
+        // How-it-works slider (infinite-loop with cloned edges)
+        (function () {
+            const slider = document.getElementById('how-slider');
+            const track = document.getElementById('how-track');
+            const prevBtn = document.getElementById('how-prev');
+            const nextBtn = document.getElementById('how-next');
+            const dots = Array.from(document.querySelectorAll('.how-dot'));
+            const originals = Array.from(track.children);
+            const COUNT = originals.length;
+            const AUTOPLAY_MS = 2000;
+
+            // Insert clones: [cloneOfLast, ...real, cloneOfFirst]
+            const firstClone = originals[0].cloneNode(true);
+            const lastClone = originals[COUNT - 1].cloneNode(true);
+            firstClone.setAttribute('aria-hidden', 'true');
+            lastClone.setAttribute('aria-hidden', 'true');
+            track.appendChild(firstClone);
+            track.insertBefore(lastClone, originals[0]);
+
+            let idx = 0;   // logical 0..COUNT-1
+            let pos = 1;   // DOM slot; real slide i lives at slot i+1
+            let dragStartX = null;
+            let dragDX = 0;
+            let dragging = false;
+            let autoplayTimer = null;
+
+            function applyTransform(animate) {
+                const base = -pos * 100;
+                const offsetPct = dragging && slider.clientWidth
+                    ? (dragDX / slider.clientWidth) * 100
+                    : 0;
+                track.style.transition = animate && !dragging ? 'transform 300ms ease-out' : 'none';
+                track.style.transform = `translateX(${base + offsetPct}%)`;
+            }
+
+            function updateDots() {
+                dots.forEach((d, i) => {
+                    d.classList.toggle('bg-primary', i === idx);
+                    d.classList.toggle('bg-muted-foreground/30', i !== idx);
+                });
+            }
+
+            function go(nextLogical) {
+                const norm = ((nextLogical % COUNT) + COUNT) % COUNT;
+                // Pick the DOM slot that animates in the natural direction.
+                if (idx === COUNT - 1 && norm === 0) pos = COUNT + 1;       // forward into trailing clone
+                else if (idx === 0 && norm === COUNT - 1) pos = 0;          // backward into leading clone
+                else pos = norm + 1;
+                idx = norm;
+                applyTransform(true);
+                updateDots();
+            }
+
+            // After animating into a clone, snap silently to the real slide.
+            track.addEventListener('transitionend', () => {
+                if (pos === COUNT + 1) { pos = 1; applyTransform(false); }
+                else if (pos === 0) { pos = COUNT; applyTransform(false); }
+            });
+
+            function startAutoplay() {
+                stopAutoplay();
+                autoplayTimer = setInterval(() => go(idx + 1), AUTOPLAY_MS);
+            }
+            function stopAutoplay() {
+                if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; }
+            }
+            function restartAutoplay() {
+                if (autoplayTimer) startAutoplay();
+            }
+
+            prevBtn.addEventListener('click', () => { go(idx - 1); restartAutoplay(); });
+            nextBtn.addEventListener('click', () => { go(idx + 1); restartAutoplay(); });
+            dots.forEach((d) =>
+                d.addEventListener('click', () => { go(parseInt(d.dataset.idx, 10)); restartAutoplay(); })
+            );
+
+            slider.addEventListener('mouseenter', stopAutoplay);
+            slider.addEventListener('mouseleave', startAutoplay);
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) stopAutoplay(); else startAutoplay();
+            });
+
+            slider.tabIndex = 0;
+            slider.addEventListener('keydown', (e) => {
+                if (e.key === 'ArrowLeft') { e.preventDefault(); go(idx - 1); restartAutoplay(); }
+                if (e.key === 'ArrowRight') { e.preventDefault(); go(idx + 1); restartAutoplay(); }
+            });
+
+            function onDown(e) {
+                dragging = true;
+                dragStartX = e.touches ? e.touches[0].clientX : e.clientX;
+                dragDX = 0;
+                applyTransform(false);
+            }
+            function onMove(e) {
+                if (!dragging) return;
+                const x = e.touches ? e.touches[0].clientX : e.clientX;
+                dragDX = x - dragStartX;
+                applyTransform(false);
+            }
+            function onUp() {
+                if (!dragging) return;
+                const threshold = Math.min(80, slider.clientWidth * 0.15);
+                const dx = dragDX;
+                dragging = false;
+                dragDX = 0;
+                if (dx > threshold) go(idx - 1);
+                else if (dx < -threshold) go(idx + 1);
+                else applyTransform(true);
+            }
+
+            slider.addEventListener('mousedown', onDown);
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+            slider.addEventListener('touchstart', onDown, { passive: true });
+            slider.addEventListener('touchmove', onMove, { passive: true });
+            slider.addEventListener('touchend', onUp);
+            slider.addEventListener('touchcancel', onUp);
+
+            applyTransform(false);
+            updateDots();
+            startAutoplay();
+        })();
+    </script>
+</body>
+</html>
