@@ -90,7 +90,7 @@ function statusText(s: DetectStatus | null): string {
       const pct = Math.round((s.page / s.total) * 100);
       return `Reading text from the PDF (${pct}%)…`;
     }
-    return 'Reading text from the PDF…';
+    return 'Loading detection model…';
   }
   const pct = s.total > 0 ? Math.round((s.chunk / s.total) * 100) : 0;
   return `Detecting PII (${pct}%)…`;
@@ -795,14 +795,17 @@ export function MainScreen(): JSX.Element {
 
   useEffect(() => {
     const off = window.scrubber.onEvent((evt) => {
-      console.log('[scrubber event]', evt);
-      if (evt.cmd !== 'detect') return;
+      if (evt.cmd !== 'detect') {
+        return;
+      }
       if (evt.kind === 'page') {
         const pageNum = evt.page_num as number | undefined;
         const imagePath = evt.image_path as string | undefined;
         const imgW = evt.image_width as number | undefined;
         const imgH = evt.image_height as number | undefined;
-        if (!pageNum || !imagePath || !imgW || !imgH) return;
+        if (!pageNum || !imagePath || !imgW || !imgH) {
+          return;
+        }
         setPages((prev) => {
           const next = new Map(prev);
           next.set(pageNum, { image_path: imagePath, image_width: imgW, image_height: imgH });
@@ -810,7 +813,9 @@ export function MainScreen(): JSX.Element {
         });
       } else if (evt.kind === 'pii') {
         const item = evt.item as { type: string; value: string } | undefined;
-        if (!item) return;
+        if (!item) {
+          return;
+        }
         setPiiItems((prev) => {
           const existing = prev.find((p) => p.value === item.value && p.type === item.type);
           if (existing) {
@@ -1197,6 +1202,14 @@ export function MainScreen(): JSX.Element {
             {(piiItems.length > 0 || isScanning) && (
               <div className="flex-1 flex flex-col min-h-0">
                 <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 pr-1">
+                  {isScanning && (
+                    <div className="bg-secondary/50 border border-border border-dashed rounded-lg p-4 flex items-center gap-3">
+                      <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                      <span className="text-sm text-muted-foreground">
+                        {statusText(detectStatus)}
+                      </span>
+                    </div>
+                  )}
                   {(() => {
                     const groups = new Map<string, { type: string; entries: { item: PIIItem; index: number }[] }>();
                     piiItems.forEach((item, index) => {
@@ -1265,14 +1278,6 @@ export function MainScreen(): JSX.Element {
                     });
                   })()}
 
-                  {isScanning && (
-                    <div className="bg-secondary/50 border border-border border-dashed rounded-lg p-4 flex items-center gap-3">
-                      <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                      <span className="text-sm text-muted-foreground">
-                        {statusText(detectStatus)}
-                      </span>
-                    </div>
-                  )}
                 </div>
 
                 <div className="pt-4 mt-4 border-t border-border">
