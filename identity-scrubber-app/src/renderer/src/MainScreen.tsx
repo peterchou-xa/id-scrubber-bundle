@@ -590,11 +590,37 @@ export function MainScreen(): JSX.Element {
     prepaid?: { usage: number; granted: number } | null;
   } | null>(null);
 
+  // Server tells us when it had to charge a "missing offline_lease report"
+  // penalty (see billing.service.ts). We show a dismissable banner the first
+  // time we see a given lease_issued_at — the key is persisted so a refresh
+  // doesn't keep re-showing the same notice.
+  const PENALTY_DISMISS_KEY = 'idscrubber:dismissedPenaltyLeaseIssuedAt';
+  const [offlinePenalty, setOfflinePenalty] = useState<{
+    charged: number;
+    lease_issued_at: string;
+  } | null>(null);
+
+  const notePenalty = (
+    p: { charged: number; lease_issued_at: string } | undefined,
+  ): void => {
+    if (!p || p.charged <= 0) return;
+    if (localStorage.getItem(PENALTY_DISMISS_KEY) === p.lease_issued_at) return;
+    setOfflinePenalty(p);
+  };
+
+  const dismissPenalty = (): void => {
+    if (offlinePenalty) {
+      localStorage.setItem(PENALTY_DISMISS_KEY, offlinePenalty.lease_issued_at);
+    }
+    setOfflinePenalty(null);
+  };
+
   const refreshBalance = async (): Promise<void> => {
     const r = await window.billing.balance();
     if (r.free_daily || r.free_week1 || r.prepaid !== undefined) {
       setBalance({ free_daily: r.free_daily, free_week1: r.free_week1, prepaid: r.prepaid });
     }
+    notePenalty(r.offline_penalty);
   };
 
   const [buyOpen, setBuyOpen] = useState(false);
@@ -611,6 +637,7 @@ export function MainScreen(): JSX.Element {
     if (r.free_daily || r.free_week1 || r.prepaid !== undefined) {
       setBalance({ free_daily: r.free_daily, free_week1: r.free_week1, prepaid: r.prepaid });
     }
+    notePenalty(r.offline_penalty);
     if (r.licenses) {
       setLicenses(r.licenses);
     } else if (!r.ok) {
@@ -918,6 +945,7 @@ export function MainScreen(): JSX.Element {
             prepaid: quota.prepaid ?? null,
           });
         }
+        notePenalty(quota.offline_penalty);
         if (!quota.allow) {
           setPaywall({
             reason: quota.reason ?? 'network_error',
@@ -1016,40 +1044,28 @@ export function MainScreen(): JSX.Element {
         }}
       />
 
-
-      {/*
-      <div className="absolute top-4 right-4 z-50 flex gap-2">
-        <button
-          onClick={handleReset}
-          className="px-3 py-1.5 bg-card text-xs rounded-lg border border-border hover:bg-secondary shadow-sm transition-colors font-medium"
-        >
-          Empty
-        </button>
-        <button
-          onClick={() => {
-            setSelectedFile('confidential_document.pdf');
-            setPiiItems([
-              { type: 'name', value: 'Peter Chou', count: 1, checked: true },
-            ]);
-            setAppState('detected');
-          }}
-          className="px-3 py-1.5 bg-card text-xs rounded-lg border border-border hover:bg-secondary shadow-sm transition-colors font-medium"
-        >
-          Detected
-        </button>
-        <button
-          onClick={() => {
-            setSelectedFile('confidential_document.pdf');
-            setAppState('scrubbed');
-          }}
-          className="px-3 py-1.5 bg-card text-xs rounded-lg border border-border hover:bg-secondary shadow-sm transition-colors font-medium"
-        >
-          Scrubbed
-        </button>
-      </div>
-      */}
-
       <div className="size-full flex flex-col p-6">
+        {offlinePenalty && (
+          <div className="mb-4 flex items-start gap-3 p-3 rounded-lg border border-amber-300 bg-amber-50 text-amber-900">
+            <Icon path={ICONS.alertTriangle} className="w-5 h-5 mt-0.5 flex-shrink-0 text-amber-600" />
+            <div className="flex-1 text-sm">
+              <div className="font-semibold">
+                {offlinePenalty.charged} page{offlinePenalty.charged === 1 ? '' : 's'} deducted
+              </div>
+              <div className="text-amber-800 mt-0.5">
+                Your local quota file was missing or tampered with after offline use &mdash; this looks like an attempt to bypass quota tracking. We charged the full offline allowance against your balance to prevent abuse. If this was a genuine mistake, contact support.
+              </div>
+            </div>
+            <button
+              onClick={dismissPenalty}
+              className="flex-shrink-0 p-1 rounded hover:bg-amber-100 text-amber-700 transition-colors"
+              aria-label="Dismiss"
+              title="Dismiss"
+            >
+              <Icon path={ICONS.x} className="w-4 h-4" />
+            </button>
+          </div>
+        )}
         <div className="mb-4 flex items-center gap-2">
           <div className="w-7 h-7 bg-primary/10 border border-primary rounded-md flex items-center justify-center">
             <Icon path={ICONS.shield} className="w-4 h-4 text-primary" />

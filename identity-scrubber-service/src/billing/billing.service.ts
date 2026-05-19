@@ -94,7 +94,12 @@ export class BillingService {
       const acct = await this.findOrCreateAccount(tx, machineId, deviceId);
       if (!acct) return { allow: false, reason: 'invalid_device' };
 
-      await this.applyOfflineLease(tx, acct, offlineLease);
+      let offlinePenalty: { charged: number; lease_issued_at: string } | undefined;
+      if (offlineLease) {
+        await this.applyOfflineLease(tx, acct, offlineLease);
+      } else {
+        offlinePenalty = await this.applyMissingReportPenalty(tx, acct);
+      }
       await this.refillDailyIfNeeded(tx, acct.id);
 
       const balances = await this.readBalances(tx, acct.id);
@@ -111,6 +116,7 @@ export class BillingService {
           free_week1: balances.w1View,
           prepaid: balances.prepaidView,
           lease: this.currentLease(acct),
+          offline_penalty: offlinePenalty,
         };
       }
 
@@ -147,6 +153,7 @@ export class BillingService {
           ? { ...balances.prepaidView, usage: balances.prepaidView.usage + fromPrepaid }
           : null,
         lease: this.currentLease(acct),
+        offline_penalty: offlinePenalty,
       };
     });
   }
@@ -181,7 +188,12 @@ export class BillingService {
       const acct = await this.findOrCreateAccount(tx, machineId, deviceId);
       if (!acct) return { ok: false, reason: 'invalid_device' };
 
-      await this.applyOfflineLease(tx, acct, offlineLease);
+      let offlinePenalty: { charged: number; lease_issued_at: string } | undefined;
+      if (offlineLease) {
+        await this.applyOfflineLease(tx, acct, offlineLease);
+      } else {
+        offlinePenalty = await this.applyMissingReportPenalty(tx, acct);
+      }
       await this.refillDailyIfNeeded(tx, acct.id);
 
       const balances = await this.readBalances(tx, acct.id);
@@ -199,6 +211,7 @@ export class BillingService {
         prepaid: balances.prepaidView,
         lease,
         licenses,
+        offline_penalty: offlinePenalty,
       };
     });
   }
@@ -530,6 +543,81 @@ export class BillingService {
        VALUES ($1, 'offline_reconcile', NULL, $2, now())`,
       [acct.id, used],
     );
+  }
+
+  // Fires when a client hits /balance or /consume without an offline_lease
+  // payload but the server still has a recorded lease. Honest clients always
+  // report (even used=0); a missing report means either the client wiped
+  // state.enc to dodge reconciliation, or legitimately lost it. Either way
+  // we charge the full ceiling so there's no incentive to wipe, then clear
+  // the lease so the next no-report call doesn't re-charge.
+  private async applyMissingReportPenalty(
+    tx: EntityManager,
+    acct: AccountRow,
+  ): Promise<{ charged: number; lease_issued_at: string } | undefined> {
+    if (
+      !acct.latest_lease_issued_at ||
+      !acct.latest_lease_expires_at ||
+      acct.latest_lease_ceiling == null
+    ) {
+      return undefined;
+    }
+    const ceiling = acct.latest_lease_ceiling;
+    if (ceiling <= 0) return undefined;
+    const penalty = ceiling;
+    const leaseIssuedAt = new Date(acct.latest_lease_issued_at).toISOString();
+
+    this.logger.warn(
+      `missing offline_lease report for account ${acct.id} with lease issued_at=${leaseIssuedAt} ceiling=${ceiling} — charging penalty=${penalty}`,
+    );
+
+    await this.refillDailyIfNeeded(tx, acct.id);
+    const balances = await this.readBalances(tx, acct.id);
+    let remaining = penalty;
+    const fromDaily = Math.min(balances.dailyRemaining, remaining); remaining -= fromDaily;
+    const fromW1 = Math.min(balances.w1Remaining, remaining); remaining -= fromW1;
+    const fromPrepaid = remaining;
+
+    if (fromDaily > 0) {
+      await tx.query(
+        `UPDATE balances SET usage = usage + $1 WHERE account_id = $2 AND sku = '${SKUS.freeDaily}'`,
+        [fromDaily, acct.id],
+      );
+    }
+    if (fromW1 > 0) {
+      await tx.query(
+        `UPDATE balances SET usage = usage + $1 WHERE account_id = $2 AND sku = '${SKUS.freeWeek1}'`,
+        [fromW1, acct.id],
+      );
+    }
+    if (fromPrepaid > 0) {
+      await tx.query(
+        `UPDATE balances SET usage = usage + $1 WHERE account_id = $2 AND sku = '${SKUS.prepaid}'`,
+        [fromPrepaid, acct.id],
+      );
+    }
+
+    // Clear the lease so a repeat no-report call doesn't re-charge. The
+    // next /balance will mint a fresh lease for the (now reduced) balance.
+    await tx.query(
+      `UPDATE accounts
+         SET latest_lease_issued_at = NULL,
+             latest_lease_expires_at = NULL,
+             latest_lease_ceiling = NULL
+       WHERE id = $1`,
+      [acct.id],
+    );
+    acct.latest_lease_issued_at = null;
+    acct.latest_lease_expires_at = null;
+    acct.latest_lease_ceiling = null;
+
+    await tx.query(
+      `INSERT INTO purchases (account_id, sku, tier, quota_total, created_at)
+       VALUES ($1, 'offline_missing_report_penalty', NULL, $2, now())`,
+      [acct.id, penalty],
+    );
+
+    return { charged: penalty, lease_issued_at: leaseIssuedAt };
   }
 
   // Called only from /balance. Mint a new lease when the active one is either

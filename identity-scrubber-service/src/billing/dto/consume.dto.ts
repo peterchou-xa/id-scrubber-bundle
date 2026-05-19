@@ -24,6 +24,14 @@ export interface Lease {
   ceiling: number;
 }
 
+// Set when the server charged the un-drained portion of a lease's ceiling
+// because the client called /balance or /consume without an offline_lease
+// report. The renderer uses lease_issued_at to dedupe notices.
+export interface OfflinePenalty {
+  charged: number;
+  lease_issued_at: string;
+}
+
 export interface ConsumeResponse {
   allow: boolean;
   reason?: 'invalid_device' | 'insufficient_balance';
@@ -32,6 +40,7 @@ export interface ConsumeResponse {
   free_week1?: BalanceView;
   prepaid?: { usage: number; granted: number } | null;
   lease?: Lease;
+  offline_penalty?: OfflinePenalty;
 }
 
 export interface BalanceQueryDto {
@@ -59,4 +68,5 @@ export interface BalanceResponse {
   prepaid?: { usage: number; granted: number } | null;
   lease?: Lease;
   licenses?: LicenseView[];
+  offline_penalty?: OfflinePenalty;
 }

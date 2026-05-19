@@ -74,6 +74,11 @@ export type OfflineConsumeReason =
   | 'offline_ceiling_reached'
   | 'offline_unavailable';
 
+export interface OfflinePenalty {
+  charged: number;
+  lease_issued_at: string;
+}
+
 export interface ConsumeResponse {
   allow: boolean;
   reason?:
@@ -90,6 +95,7 @@ export interface ConsumeResponse {
   offline_ceiling?: number;
   lease_expires_at?: string;
   synced_at?: string;
+  offline_penalty?: OfflinePenalty;
   error?: string;
 }
 
@@ -115,6 +121,7 @@ export interface BalanceResponse {
   lease_expires_at?: string;
   synced_at?: string;
   licenses?: LicenseView[];
+  offline_penalty?: OfflinePenalty;
   error?: string;
 }
 
