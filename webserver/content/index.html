@@ -200,28 +200,74 @@
                     Free daily quota to start. Buy a prepaid pack for more pages.
                 </p>
 
-                <div class="mt-10 grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                    <div class="flex flex-col items-start gap-2 w-full px-5 py-5 rounded-lg border-2 border-border bg-secondary">
-                        <div class="font-medium capitalize">Free</div>
-                        <div class="text-2xl font-semibold">$0</div>
-                        <div class="text-xs text-muted-foreground">1 page per day</div>
-                        <div class="text-xs text-muted-foreground">+20 bonus pages in week 1</div>
+                <div class="mt-10 grid sm:grid-cols-2 lg:grid-cols-4 gap-4 max-w-md sm:max-w-2xl lg:max-w-none mx-auto">
+                    <div class="group relative flex flex-col w-full p-6 rounded-xl border border-border bg-card hover:border-foreground/20 hover:shadow-sm transition-all">
+                        <div class="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Free</div>
+                        <div class="mt-4 flex items-baseline gap-1">
+                            <span class="text-4xl font-bold tracking-tight">$0</span>
+                        </div>
+                        <div class="mt-1 text-sm text-muted-foreground">Forever</div>
+                        <div class="mt-5 pt-5 border-t border-border space-y-2 text-sm">
+                            <div class="flex items-start gap-2">
+                                <svg class="w-4 h-4 mt-0.5 text-primary shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                <span>1 page per day</span>
+                            </div>
+                            <div class="flex items-start gap-2">
+                                <svg class="w-4 h-4 mt-0.5 text-primary shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                <span>+20 bonus pages in week 1</span>
+                            </div>
+                        </div>
                     </div>
-                    <div class="flex flex-col items-start gap-2 w-full px-5 py-5 rounded-lg border-2 border-border bg-secondary">
-                        <div class="font-medium capitalize">Starter</div>
-                        <div class="text-2xl font-semibold">$9</div>
-                        <div class="text-xs text-muted-foreground">100 pages</div>
+
+                    <div class="group relative flex flex-col w-full p-6 rounded-xl border border-border bg-card hover:border-foreground/20 hover:shadow-sm transition-all">
+                        <div class="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Starter</div>
+                        <div class="mt-4 flex items-baseline gap-1">
+                            <span class="text-4xl font-bold tracking-tight">$9</span>
+                        </div>
+                        <div class="mt-1 text-sm text-muted-foreground">9&cent; per page</div>
+                        <div class="mt-5 pt-5 border-t border-border space-y-2 text-sm">
+                            <div class="flex items-start gap-2">
+                                <svg class="w-4 h-4 mt-0.5 text-primary shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                <span><strong class="font-semibold">100</strong> pages</span>
+                            </div>
+                        </div>
                     </div>
-                    <div class="flex flex-col items-start gap-2 w-full px-5 py-5 rounded-lg border-2 border-primary bg-primary/10 ring-2 ring-primary/30 relative">
-                        <span class="absolute -top-2 right-3 text-[10px] font-semibold uppercase tracking-wide bg-primary text-primary-foreground px-2 py-0.5 rounded">Best value</span>
-                        <div class="font-medium capitalize">Pro</div>
-                        <div class="text-2xl font-semibold">$19</div>
-                        <div class="text-xs text-muted-foreground">500 pages</div>
+
+                    <div class="group relative flex flex-col w-full p-6 rounded-xl border-2 border-primary bg-primary/5 shadow-md shadow-primary/10 lg:scale-105 lg:-my-1">
+                        <span class="absolute -top-3 left-1/2 -translate-x-1/2 text-[10px] font-bold uppercase tracking-wider bg-primary text-primary-foreground px-3 py-1 rounded-full shadow">Best value</span>
+                        <div class="text-sm font-semibold uppercase tracking-wider text-primary">Pro</div>
+                        <div class="mt-4 flex items-baseline gap-1">
+                            <span class="text-4xl font-bold tracking-tight">$19</span>
+                        </div>
+                        <div class="mt-1 text-sm text-muted-foreground">3.8&cent; per page</div>
+                        <div class="mt-5 pt-5 border-t border-primary/20 space-y-2 text-sm">
+                            <div class="flex items-start gap-2">
+                                <svg class="w-4 h-4 mt-0.5 text-primary shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                <span><strong class="font-semibold">500</strong> pages</span>
+                            </div>
+                            <div class="flex items-start gap-2">
+                                <svg class="w-4 h-4 mt-0.5 text-primary shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                <span>Save 58% vs Starter</span>
+                            </div>
+                        </div>
                     </div>
-                    <div class="flex flex-col items-start gap-2 w-full px-5 py-5 rounded-lg border-2 border-border bg-secondary">
-                        <div class="font-medium capitalize">Max</div>
-                        <div class="text-2xl font-semibold">$49</div>
-                        <div class="text-xs text-muted-foreground">2,000 pages</div>
+
+                    <div class="group relative flex flex-col w-full p-6 rounded-xl border border-border bg-card hover:border-foreground/20 hover:shadow-sm transition-all">
+                        <div class="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Max</div>
+                        <div class="mt-4 flex items-baseline gap-1">
+                            <span class="text-4xl font-bold tracking-tight">$49</span>
+                        </div>
+                        <div class="mt-1 text-sm text-muted-foreground">2.5&cent; per page</div>
+                        <div class="mt-5 pt-5 border-t border-border space-y-2 text-sm">
+                            <div class="flex items-start gap-2">
+                                <svg class="w-4 h-4 mt-0.5 text-primary shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                <span><strong class="font-semibold">2,000</strong> pages</span>
+                            </div>
+                            <div class="flex items-start gap-2">
+                                <svg class="w-4 h-4 mt-0.5 text-primary shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                <span>Best for high volume</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -237,10 +283,15 @@
                         Free tier with a daily quota. Buy a prepaid license for more pages.
                     </p>
                     <div class="mt-6 flex flex-wrap items-center justify-center gap-3">
-                        <a href="#" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors shadow-sm">
-                            Download for macOS
+                        <a href="https://forms.gle/cNoUR3ntfgxQZBxT8" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors shadow-sm">
+                            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M16.365 1.43c0 1.14-.493 2.27-1.177 3.08-.744.9-1.99 1.57-2.987 1.57-.12 0-.23-.02-.3-.03-.01-.06-.04-.22-.04-.39 0-1.15.572-2.27 1.206-2.98.804-.94 2.142-1.64 3.248-1.68.03.13.05.28.05.43zm4.565 15.71c-.03.07-.463 1.58-1.518 3.12-.945 1.34-1.94 2.71-3.43 2.71-1.517 0-1.9-.88-3.63-.88-1.698 0-2.302.91-3.67.91-1.377 0-2.332-1.26-3.428-2.8-1.287-1.82-2.323-4.63-2.323-7.28 0-4.28 2.797-6.55 5.552-6.55 1.448 0 2.675.95 3.6.95.865 0 2.222-1.01 3.902-1.01.613 0 2.886.06 4.374 2.19-.13.09-2.383 1.37-2.383 4.19 0 3.26 2.854 4.42 2.955 4.45z"/></svg>
+                            macOS Join waitlist
                         </a>
-                        <span class="text-xs text-muted-foreground">Windows &amp; Linux coming soon</span>
+                        <span class="inline-flex items-center gap-2 px-5 py-2.5 rounded-md border border-border bg-secondary text-muted-foreground font-medium cursor-not-allowed">
+                            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5L10 4.5v7H3v-6zM11 4.35L21 3v9h-10V4.35zM3 12.5h7v7L3 18.5v-6zM11 12.5h10V21l-10-1.35V12.5z"/></svg>
+                            Windows
+                            <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-muted-foreground/15">Soon</span>
+                        </span>
                     </div>
                 </div>
             </section>
@@ -269,7 +320,7 @@
             const dots = Array.from(document.querySelectorAll('.how-dot'));
             const originals = Array.from(track.children);
             const COUNT = originals.length;
-            const AUTOPLAY_MS = 2000;
+            const AUTOPLAY_MS = 2900;
 
             // Insert clones: [cloneOfLast, ...real, cloneOfFirst]
             const firstClone = originals[0].cloneNode(true);
