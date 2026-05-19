@@ -12,10 +12,12 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "licenses:generate": "./scripts/generate-acknowledgements.sh",
     "postinstall": "electron-builder install-app-deps"
   },
   "author": "",
   "license": "UNLICENSED",
+  "private": true,
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.1",
     "@electron-toolkit/utils": "^3.0.0"
@@ -51,6 +53,10 @@
         "from": "resources/scrubber",
         "to": "scrubber",
         "filter": ["**/*"]
+      },
+      {
+        "from": "build/ACKNOWLEDGEMENTS.txt",
+        "to": "ACKNOWLEDGEMENTS.txt"
       }
     ],
     "mac": {

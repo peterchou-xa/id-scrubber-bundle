@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, shell } from 'electron';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import { electronApp, optimizer, is } from '@electron-toolkit/utils';
@@ -21,6 +21,56 @@ import {
 
 let mainWindow: BrowserWindow | null = null;
 let downloadInFlight = false;
+
+function acknowledgementsPath(): string {
+  return is.dev
+    ? path.join(app.getAppPath(), 'build', 'ACKNOWLEDGEMENTS.txt')
+    : path.join(process.resourcesPath, 'ACKNOWLEDGEMENTS.txt');
+}
+
+function buildAppMenu(): void {
+  const isMac = process.platform === 'darwin';
+  const openAcknowledgements = async (): Promise<void> => {
+    const result = await shell.openPath(acknowledgementsPath());
+    if (result) {
+      dialog.showErrorBox('Acknowledgements', `Unable to open file: ${result}`);
+    }
+  };
+
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(isMac
+      ? ([
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              { label: 'Acknowledgements…', click: openAcknowledgements },
+              { type: 'separator' },
+              { role: 'services' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ],
+          },
+        ] as Electron.MenuItemConstructorOptions[])
+      : []),
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+    {
+      role: 'help',
+      submenu: [
+        ...(isMac ? [] : [{ label: 'Acknowledgements…', click: openAcknowledgements }]),
+      ],
+    },
+  ];
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
 
 // Custom scheme so the renderer can <img src="idscrub-img:///abs/path/page-1.png">
 // without tripping over file:// security restrictions. Must be registered as
@@ -88,6 +138,7 @@ async function startGlinerDownload(): Promise<{ ok: true; dir: string } | { ok: 
 
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.identityscrubber.app');
+  buildAppMenu();
 
   // Bridge idscrub-img:// → on-disk PNG. The python scrubber writes pages to
   // a system temp dir and emits absolute paths; the renderer constructs URLs

@@ -1,39 +1,38 @@
 # Identity Scrubber (Electron)
 
-Desktop app that bootstraps a local AI engine (Ollama) on first launch.
+Desktop app that detects and redacts PII in PDFs using a local OCR + NER pipeline. The Python scrubber (PyInstaller bundle) is shipped as an `extraResource`; the GLiNER PII model is downloaded on first launch.
 
 ## Flow
 
-1. On launch, main process checks for Ollama at:
-   - `~/Applications/Ollama.app`
-   - `/Applications/Ollama.app`
-   - `ollama` on `$PATH`
-2. If missing, UI shows an **Install** button.
-3. Clicking Install runs a **user-space install** (no `sudo`):
-   - Download `Ollama.dmg` from `https://ollama.com/download/Ollama.dmg` via `electron.net`
-   - `hdiutil attach` the DMG
-   - `cp -R Ollama.app ~/Applications/Ollama.app`
-   - `hdiutil detach`
-   - `xattr -dr com.apple.quarantine` on the app
-4. Start the `ollama serve` binary inside the bundle, then poll `http://127.0.0.1:11434/api/tags` until it responds.
-
-No `curl | sh`, no Docker, no silent writes to `/Applications`.
+1. On launch, the renderer asks `gliner:status` whether the GLiNER ONNX model is already cached in `app.getPath('userData')/gliner/`.
+2. If not, the UI shows a **Download model** action. The main process streams the model files from Hugging Face (`nvidia/gliner-pii`), emitting `gliner:progress` events.
+3. Once the model is present, the user picks a PDF via `dialog:openPdf`. The main process spawns the bundled scrubber binary (`resources/scrubber/identity-scrubber`) in serve mode.
+4. `scrubber:detect` runs OCR + GLiNER and streams per-page events back to the renderer. `scrubber:scrub` applies redactions to the selected matches and writes the redacted PDF.
 
 ## Layout
 
 ```
 src/
   main/
-    index.js     # BrowserWindow + IPC handlers
-    ollama.js    # detect / download / install / start
+    index.ts            # BrowserWindow + IPC handlers
+    scrubber.ts         # spawns/manages the Python serve process
+    gliner.ts           # model download + status
+    identifiersStore.ts # persisted user-supplied identifiers
+    billing.ts          # license + page-quota accounting
+    deviceId.ts
+    metrics.ts
   preload/
-    index.js     # contextBridge API
+    index.ts            # contextBridge APIs (gliner, scrubber, dialogApi, identifiers, billing)
   renderer/
-    index.html
-    renderer.js  # state machine UI
-    styles.css
+    src/
+      App.tsx
+      MainScreen.tsx
+      useGlinerSetup.ts
+      ...
 build/
   entitlements.mac.plist
+resources/
+  scrubber/             # PyInstaller output (gitignored, ~375 MB)
 ```
 
 ## Develop
@@ -61,24 +60,30 @@ so the build is reproducible.
 ## Build (signed DMG)
 
 ```bash
-npm run build
+npm run build:mac
 ```
 
-`electron-builder` is configured in `package.json` to produce a notarizable DMG.
-Set `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` env vars before
-running `npm run build` if you want notarization.
+`electron-builder` is configured in `package.json` to produce a notarizable universal
+DMG (arm64 + x64). Set `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`
+env vars before running if you want notarization.
 
-## Renderer states
+## Preload APIs
 
-`idle` → `downloading` → `installing` → `starting` → `done`, with `error` as a
-terminal state that shows a Retry button. The main process emits `ollama:progress`
-events; the renderer maps them into the UI.
-
-## Preload API
+Exposed on `window` via `contextBridge`:
 
 ```ts
-window.ollama.getStatus(): Promise<{ installed, running, location }>
-window.ollama.install(): Promise<{ ok, location? , error? }>
-window.ollama.start(): Promise<{ ok, alreadyRunning?, error? }>
-window.ollama.onProgress(cb): () => void  // returns unsubscribe
+window.gliner.getStatus(): Promise<{ cached, dir, repo }>
+window.gliner.download(): Promise<{ ok, dir } | { ok: false, error }>
+window.gliner.onProgress(cb): () => void
+
+window.scrubber.detect(pdfPath, customPii?): Promise<ScrubberCmdResult>
+window.scrubber.scrub(selected, color?, byType?): Promise<ScrubberCmdResult>
+window.scrubber.onEvent(cb): () => void
+window.scrubber.onLog(cb): () => void
+
+window.dialogApi.openPdf(): Promise<{ path, name } | null>
+window.dialogApi.openPath(filePath): Promise<{ ok, error? }>
+
+window.identifiers.load() / save(values)
+window.billing.consume(pages) / balance() / startCheckout(tier) / redeemLicenseKey(key)
 ```

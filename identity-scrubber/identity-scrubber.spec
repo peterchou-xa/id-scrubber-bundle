@@ -21,7 +21,6 @@ for pkg in (
     'pypdfium2',
     'pikepdf',
     'pdfminer',
-    'pymupdf',
 ):
     tmp_d, tmp_b, tmp_h = collect_all(pkg)
     datas += tmp_d
@@ -79,7 +78,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['ollama', 'rapidocr', 'pytesseract'],
+    excludes=[],
     noarchive=False,
     optimize=0,
 )
