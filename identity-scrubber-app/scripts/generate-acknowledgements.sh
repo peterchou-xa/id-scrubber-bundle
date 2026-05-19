@@ -77,9 +77,12 @@ fi
 echo "  wrote $BUILD_DIR/THIRD_PARTY_LICENSES_PYTHON.txt"
 
 echo "==> Combining into ACKNOWLEDGEMENTS.txt"
+# Model weights (NVIDIA gliner-pii, PaddleOCR, etc.) aren't pip packages,
+# so they're maintained by hand in scripts/BUNDLED_MODELS.txt.
 cat \
   "$BUILD_DIR/THIRD_PARTY_LICENSES_ELECTRON.txt" \
   "$BUILD_DIR/THIRD_PARTY_LICENSES_PYTHON.txt" \
+  "$SCRIPT_DIR/BUNDLED_MODELS.txt" \
   > "$BUILD_DIR/ACKNOWLEDGEMENTS.txt"
 
 echo "Done. $(wc -l < "$BUILD_DIR/ACKNOWLEDGEMENTS.txt") lines, $(du -h "$BUILD_DIR/ACKNOWLEDGEMENTS.txt" | cut -f1)"

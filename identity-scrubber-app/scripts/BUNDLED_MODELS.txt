@@ -1,0 +1,38 @@
+
+==============================================================================
+Identity Scrubber — Bundled Model Weights
+==============================================================================
+
+This product downloads and uses the following machine-learning model weights
+at runtime. The weights are governed by their own license terms, which are
+separate from the licenses of any Python or Node.js packages above.
+
+------------------------------------------------------------------------------
+nvidia/gliner-pii
+  License: NVIDIA Open Model License Agreement
+  License URL: https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/
+  Model card: https://huggingface.co/nvidia/gliner-pii
+------------------------------------------------------------------------------
+
+Licensed by NVIDIA Corporation under the NVIDIA Open Model License.
+
+Key terms (summary only — the full agreement at the URL above is authoritative):
+
+  * Commercial use is permitted, royalty-free.
+  * You may create derivative models; NVIDIA retains rights to the original.
+  * You must not bypass or disable any safety guardrails built into the model
+    without substituting an equivalent guardrail appropriate for your use case.
+  * Use must comply with NVIDIA's Trustworthy AI terms.
+  * NVIDIA trademarks may only be used to describe the origin of the model.
+  * Patent litigation against any party regarding the model terminates the
+    license automatically.
+
+------------------------------------------------------------------------------
+PaddleOCR pretrained models
+  License: Apache License 2.0
+  Project: https://github.com/PaddlePaddle/PaddleOCR
+------------------------------------------------------------------------------
+
+This application bundles or downloads PaddleOCR pretrained detection and
+recognition models, distributed under the Apache License, Version 2.0.
+See https://www.apache.org/licenses/LICENSE-2.0 for the full text.
