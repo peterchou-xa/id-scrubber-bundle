@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './load-env';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import * as express from 'express';

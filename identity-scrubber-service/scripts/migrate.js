@@ -4,6 +4,12 @@ const fs = require('fs');
 const path = require('path');
 const { Client } = require('pg');
 
+// Load the env file matching NODE_ENV (default: development), same as the app.
+const envFile = process.env.NODE_ENV === 'production' ? '.env.prod' : '.env.dev';
+require('dotenv').config({
+  path: path.resolve(__dirname, '..', envFile),
+});
+
 const MIGRATIONS_DIR = path.resolve(__dirname, '..', 'migrations');
 
 async function main() {
