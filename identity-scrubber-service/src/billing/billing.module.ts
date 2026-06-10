@@ -1,13 +1,12 @@
 import { Module } from '@nestjs/common';
 import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
-import { LemonSqueezyController } from './lemonsqueezy/lemonsqueezy.controller';
-import { LemonSqueezyService } from './lemonsqueezy/lemonsqueezy.service';
-import { InMemoryRateLimiter } from './lemonsqueezy/rate-limiter';
+import { PolarController } from './polar/polar.controller';
+import { PolarService } from './polar/polar.service';
 
 @Module({
-  controllers: [BillingController, LemonSqueezyController],
-  providers: [BillingService, LemonSqueezyService, InMemoryRateLimiter],
-  exports: [BillingService, LemonSqueezyService],
+  controllers: [BillingController, PolarController],
+  providers: [BillingService, PolarService],
+  exports: [BillingService, PolarService],
 })
 export class BillingModule {}

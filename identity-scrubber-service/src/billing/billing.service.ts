@@ -229,10 +229,10 @@ export class BillingService {
       tier: string | null;
       quota_total: number | string;
       amount_cents: number | string | null;
-      ls_order_id: string | null;
+      provider_order_id: string | null;
       created_at: Date;
     }> = await tx.query(
-      `SELECT id, sku, tier, quota_total, amount_cents, ls_order_id, created_at
+      `SELECT id, sku, tier, quota_total, amount_cents, provider_order_id, created_at
          FROM purchases
         WHERE account_id = $1 AND sku = $2
         ORDER BY created_at DESC, id DESC
@@ -250,7 +250,7 @@ export class BillingService {
           : typeof r.amount_cents === 'number'
             ? r.amount_cents
             : Number(r.amount_cents),
-      ls_order_id: r.ls_order_id,
+      provider_order_id: r.provider_order_id,
       created_at: new Date(r.created_at).toISOString(),
     }));
   }
@@ -269,29 +269,28 @@ export class BillingService {
     });
   }
 
-  // Webhook-only grant path. Idempotent on ls_order_id; first-time inserts a
-  // prepaid balance row, subsequent grants add to granted. The license_key
-  // column is populated separately by license_key_created or manual redeem.
+  // Webhook-only grant path. Idempotent on provider_order_id; first-time
+  // inserts a prepaid balance row, subsequent grants add to granted.
   async grantPrepaid(params: {
     accountId: string;
     tier: Tier;
-    lsOrderId: string;
+    providerOrderId: string;
     amountCents: number;
   }): Promise<{ granted: boolean; pagesAdded: number }> {
-    const { accountId, tier, lsOrderId, amountCents } = params;
+    const { accountId, tier, providerOrderId, amountCents } = params;
     const pages = TIER_PAGES[tier];
     if (!pages) throw new BadRequestException(`unknown tier: ${tier}`);
 
     return this.ds.transaction(async (tx) => {
       try {
         await tx.query(
-          `INSERT INTO purchases (account_id, sku, tier, quota_total, amount_cents, ls_order_id, created_at)
+          `INSERT INTO purchases (account_id, sku, tier, quota_total, amount_cents, provider_order_id, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, now())`,
-          [accountId, SKUS.prepaid, tier, pages, amountCents, lsOrderId],
+          [accountId, SKUS.prepaid, tier, pages, amountCents, providerOrderId],
         );
       } catch (e) {
         const msg = (e as Error).message ?? '';
-        if (msg.includes('purchases_ls_order_id_key') || msg.includes('duplicate key')) {
+        if (msg.includes('purchases_provider_order_id_key') || msg.includes('duplicate key')) {
           return { granted: false, pagesAdded: 0 };
         }
         throw e;
@@ -307,30 +306,6 @@ export class BillingService {
 
       return { granted: true, pagesAdded: pages };
     });
-  }
-
-  // Idempotent: only writes when the row exists and license_key is still null,
-  // so a late license_key_created after an earlier redeem (or vice versa) is
-  // a no-op. Returns true iff a row was updated.
-  async setLicenseKeyForOrder(lsOrderId: string, licenseKey: string): Promise<boolean> {
-    const r = await this.ds.query(
-      `UPDATE purchases SET license_key = $1
-         WHERE ls_order_id = $2 AND license_key IS NULL`,
-      [licenseKey, lsOrderId],
-    );
-    // pg driver returns [rows, count] for UPDATE
-    const count = Array.isArray(r) && r.length >= 2 ? Number(r[1]) : 0;
-    return count > 0;
-  }
-
-  async findPurchaseByLicenseKey(
-    licenseKey: string,
-  ): Promise<{ account_id: string; ls_order_id: string } | null> {
-    const rows: { account_id: string; ls_order_id: string }[] = await this.ds.query(
-      `SELECT account_id, ls_order_id FROM purchases WHERE license_key = $1 LIMIT 1`,
-      [licenseKey],
-    );
-    return rows[0] ?? null;
   }
 
   async getPrepaidView(

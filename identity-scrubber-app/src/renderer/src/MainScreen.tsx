@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { BuyModal } from './BuyModal';
-import type { RedeemStatus } from '../../preload/index';
 
 type IdentifierType = 'name' | 'ssn' | 'dob' | 'email' | 'address' | 'other';
 
@@ -161,7 +160,7 @@ interface LicenseView {
   tier: string | null;
   quota_total: number;
   amount_cents: number | null;
-  ls_order_id: string | null;
+  provider_order_id: string | null;
   created_at: string;
 }
 
@@ -275,93 +274,6 @@ function formatAcquired(iso: string): string {
   return date + ' '.repeat(gap) + time;
 }
 
-const REDEEM_MESSAGES: Record<RedeemStatus, string> = {
-  ok: 'License redeemed.',
-  invalid_input: 'Please paste your license key.',
-  no_account:
-    "We don't have a record for this device yet. Try opening a PDF first, then redeem.",
-  invalid_key:
-    "We couldn't verify that license key. If you just purchased, wait a minute and try again — otherwise, double-check the key.",
-  key_belongs_to_other_account: 'This key belongs to another account.',
-  already_applied: 'This license has already been applied to your account.',
-  rate_limited: 'Too many attempts — please wait a moment before retrying.',
-  validate_unavailable:
-    "Couldn't reach Lemon Squeezy to verify the key. Try again shortly.",
-  network_error: "Couldn't reach the billing service. Check your connection.",
-};
-
-function RedeemSection({
-  onRedeemed,
-}: {
-  onRedeemed: () => void;
-}): JSX.Element {
-  const [key, setKey] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<RedeemStatus | null>(null);
-  const [pagesAdded, setPagesAdded] = useState<number | null>(null);
-
-  const submit = async (): Promise<void> => {
-    if (busy) return;
-    setBusy(true);
-    setStatus(null);
-    setPagesAdded(null);
-    const r = await window.billing.redeemLicenseKey(key);
-    setStatus(r.status);
-    if (r.ok) {
-      // Server is authoritative about how many pages this redeem actually
-      // granted (0 for an already-bound key, full tier pages for a fresh
-      // grant). Snapshot diffing on the client was racy.
-      setPagesAdded(r.pages_added ?? 0);
-      setKey('');
-      // Always refresh the parent's balance — even on an already-bound
-      // no-op, the badge may have been stale beforehand.
-      onRedeemed();
-    }
-    setBusy(false);
-  };
-
-  return (
-    <div className="pt-3 mt-1 border-t border-border flex flex-col gap-2">
-      <label className="text-xs font-medium text-muted-foreground">
-        Don't see your order above? Redeem it with the license key from your receipt email
-      </label>
-      <div className="flex gap-2">
-        <input
-          type="text"
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-          autoComplete="off"
-          spellCheck={false}
-          disabled={busy}
-          className="flex-1 px-3 py-2 text-sm font-mono bg-secondary border border-border rounded-md outline-none focus:border-primary/50 focus:bg-card transition-colors placeholder:text-xs placeholder:text-muted-foreground/40"
-        />
-        <button
-          type="button"
-          onClick={() => void submit()}
-          disabled={busy || !key.trim()}
-          className="px-3 py-1.5 text-sm font-medium bg-secondary rounded-md hover:bg-secondary/80 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {busy ? 'Redeeming…' : 'Redeem'}
-        </button>
-      </div>
-      {status && (() => {
-        const tone =
-          status === 'ok'
-            ? 'text-green-600'
-            : status === 'already_applied' || status === 'key_belongs_to_other_account'
-              ? 'text-red-600'
-              : 'text-muted-foreground';
-        const text =
-          status === 'ok' && pagesAdded != null && pagesAdded > 0
-            ? `License redeemed — ${pagesAdded.toLocaleString()} pages added.`
-            : REDEEM_MESSAGES[status];
-        return <p className={'text-xs ' + tone}>{text}</p>;
-      })()}
-    </div>
-  );
-}
-
 function BalanceDetailsModal({
   open,
   onClose,
@@ -369,7 +281,6 @@ function BalanceDetailsModal({
   licenses,
   loading,
   error,
-  onRedeemed,
 }: {
   open: boolean;
   onClose: () => void;
@@ -377,7 +288,6 @@ function BalanceDetailsModal({
   licenses: LicenseView[] | null;
   loading: boolean;
   error: string | null;
-  onRedeemed: () => void;
 }): JSX.Element | null {
   if (!open) return null;
 
@@ -493,7 +403,6 @@ function BalanceDetailsModal({
                 <thead className="bg-secondary text-muted-foreground sticky top-0 z-10 shadow-[0_1px_0_0_var(--border)]">
                   <tr>
                     <th className="text-left font-medium px-3 py-2">Type</th>
-                    <th className="text-right font-medium px-3 py-2">Order</th>
                     <th className="text-right font-medium px-3 py-2">Pages</th>
                     <th className="text-right font-medium px-3 py-2">Price</th>
                     <th className="text-right font-medium px-3 py-2">Acquired</th>
@@ -506,12 +415,6 @@ function BalanceDetailsModal({
                       <tr key={lic.id} className="border-t border-border">
                         <td className="px-3 py-2 font-medium text-foreground capitalize">
                           {formatTier(lic.tier)}
-                        </td>
-                        <td
-                          className="px-3 py-2 text-right text-muted-foreground font-mono tabular-nums"
-                          title={lic.ls_order_id ? `Order #${lic.ls_order_id}` : undefined}
-                        >
-                          {lic.ls_order_id ? `#${lic.ls_order_id}` : '—'}
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums">
                           {lic.quota_total.toLocaleString()}
@@ -534,8 +437,6 @@ function BalanceDetailsModal({
             </div>
           )}
         </div>
-
-        <RedeemSection onRedeemed={onRedeemed} />
       </div>
     </div>
   );
@@ -1855,9 +1756,6 @@ export function MainScreen(): JSX.Element {
         licenses={licenses}
         loading={licensesLoading}
         error={licensesError}
-        onRedeemed={() => {
-          void openDetails();
-        }}
       />
     </div>
   );

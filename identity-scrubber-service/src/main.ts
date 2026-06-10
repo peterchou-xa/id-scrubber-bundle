@@ -8,8 +8,8 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bodyParser: false,
   });
-  // Capture the raw request body so the Lemon Squeezy webhook can verify the
-  // HMAC signature over the exact bytes LS signed.
+  // Capture the raw request body so the Polar webhook can verify the Standard
+  // Webhooks signature over the exact bytes Polar signed.
   app.use(
     express.json({
       verify: (req: express.Request & { rawBody?: Buffer }, _res, buf) => {

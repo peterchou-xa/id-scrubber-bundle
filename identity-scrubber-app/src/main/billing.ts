@@ -105,7 +105,7 @@ export interface LicenseView {
   tier: string | null;
   quota_total: number;
   amount_cents: number | null;
-  ls_order_id: string | null;
+  provider_order_id: string | null;
   created_at: string;
 }
 

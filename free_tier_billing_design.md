@@ -45,7 +45,7 @@ Tiers (constants in code; not stored in DB). All tiers live under the `prepaid` 
 Rules:
 - All-or-nothing per scrub. A 5-page PDF when the combined active balance is 3 is rejected; the UI previews page count before the user clicks scrub.
 - Day boundary in UTC.
-- Free-tier quota lives entirely in the NestJS service. No Lemon Squeezy involvement for free.
+- Free-tier quota lives entirely in the NestJS service. No Polar involvement for free.
 
 ## Device identity (dual ID, both always sent)
 
@@ -120,7 +120,7 @@ created_at      TIMESTAMP NOT NULL
 INDEX ON (account_id)                        -- for "history of account X" queries
 ```
 
-Prepaid integration will add `ls_order_id` (LS webhook ID, unique for idempotency) and `amount_cents` (price paid, for receipts/refunds/analytics) when that work ships.
+Prepaid integration adds `provider_order_id` (Polar order ID, unique for idempotency) and `amount_cents` (price paid, for receipts/refunds/analytics). See [prepaid_billing_design.md](prepaid_billing_design.md).
 
 A `purchases` row is inserted on:
 - Account creation: two rows — the initial `free_week1` grant of 20 pages, and the initial `free_daily` grant of 1 page.
@@ -315,7 +315,7 @@ There is no cron job. Free transitions and daily refills happen inside `/consume
 ## What we are not doing (yet)
 
 - No login, no email, no magic links.
-- No Lemon Squeezy calls for free users.
+- No Polar calls for free users.
 - No IP rate-limiting or service-layer behavior analysis (deferred unless logs show real abuse).
 - No cryptographic binding of model files to `machine_id`.
 - No expiry on prepaid balances.
@@ -332,17 +332,17 @@ There is no cron job. Free transitions and daily refills happen inside `/consume
 5. Electron: before each scrub, call `/consume` with `{ machine_id, device_id, pages }` and gate the scrub on the response.
 6. Paywall / "out of pages" modal in renderer for `allow: false` responses, showing per-track balances and either `free_resets_at` or a "Buy more pages" CTA.
 
-## Prepaid tier hooks (later, not yet implemented)
+## Prepaid tier hooks (shipped)
 
-When the prepaid tier ships, this design extends without disruption:
+The prepaid tier ships on **Polar** as the Merchant of Record, and extends this design without disruption. Full spec in [prepaid_billing_design.md](prepaid_billing_design.md); the integration points with the free-tier design are:
 
 - **Schema additions**:
-  - `accounts.license_key TEXT UNIQUE` — the LS license key emailed to the buyer; identifies a paid user across devices.
-  - `purchases.ls_order_id TEXT UNIQUE` — LS order ID; the unique constraint enforces webhook idempotency.
-  - `purchases.amount_cents INT` — price paid in cents (e.g., $9 → 900); used for receipts, refunds, revenue analytics.
-- **Consume endpoint**: accept an optional `license_key` in the request and look up account by license_key first when present.
-- **LS integration**:
-  - Create one-time-purchase products in LS for Starter / Pro / Power. Pass `custom: { account_id }` on checkout so the webhook can resolve the account.
-  - Webhook handler for `order_created` (and `order_refunded` for negative balance adjustments). Verify `X-Signature` HMAC. Insert a `purchases` row and upsert the `prepaid` `balances` row (additive on `granted`, `usage` untouched). Idempotency via `purchases.ls_order_id`.
-  - Checkout URL endpoint that opens the LS overlay via `shell.openExternal`.
+  - `purchases.provider_order_id TEXT UNIQUE` — Polar order ID; the unique constraint enforces webhook idempotency.
+  - `purchases.amount_cents INT` — price paid in cents incl. tax (Polar is MoR); used for receipts, refunds, revenue analytics.
+  - (`purchases.license_key TEXT` exists from an earlier plan but is **unused** in v1 — see below.)
+- **Consume endpoint**: unchanged. The prepaid balance is just another SKU in the `free_daily → free_week1 → prepaid` drain order. **No `license_key` lookup** — the original cross-device license idea was dropped in favor of a single-device commitment (a purchase is a row on the device's account, not a portable credential).
+- **Polar integration**:
+  - One one-time-purchase product per tier (Starter / Pro / Max). The checkout is created server-side via the Polar SDK with `metadata: { account_id, tier }` so the webhook can resolve the account.
+  - Webhook handler for `order.paid` (the sole grant path). Verify the Standard Webhooks signature. Insert a `purchases` row and upsert the `prepaid` `balances` row (additive on `granted`, `usage` untouched). Idempotency via `purchases.provider_order_id`. Tier is derived from `product_id`, not the amount (MoR tax makes the amount unreliable).
+  - Checkout URL endpoint that opens the hosted Polar checkout via `shell.openExternal`.
 - **UI**: "Buy more pages" surface in the renderer showing the three tier options and current `prepaid` balance.
