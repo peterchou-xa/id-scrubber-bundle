@@ -3,6 +3,7 @@ module.exports = {
     {
       name: 'identity-scrubber-service',
       script: 'dist/main.js',
+      cwd: __dirname,
       instances: 1,
       autorestart: true,
       env: {
@@ -13,6 +14,7 @@ module.exports = {
     {
       name: 'identity-scrubber-service-dev',
       script: 'dist/main.js',
+      cwd: __dirname,
       instances: 1,
       autorestart: true,
       env: {
