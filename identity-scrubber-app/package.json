@@ -8,6 +8,7 @@
     "start": "electron-vite preview",
     "build": "electron-vite build",
     "build:mac": "electron-vite build && electron-builder --mac",
+    "build:mac:fast": "electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac",
     "build:scrubber": "cd ../identity-scrubber && ./bin/pyinstaller --noconfirm identity-scrubber.spec && rm -rf ../identity-scrubber-app/resources/scrubber && mkdir -p ../identity-scrubber-app/resources/scrubber && cp -R dist/identity-scrubber/ ../identity-scrubber-app/resources/scrubber/",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
@@ -65,15 +66,17 @@
         {
           "target": "dmg",
           "arch": [
-            "arm64",
-            "x64"
+            "arm64"
           ]
         }
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist"
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": {
+        "teamId": "KJ9X7B7WSQ"
+      }
     }
   }
 }

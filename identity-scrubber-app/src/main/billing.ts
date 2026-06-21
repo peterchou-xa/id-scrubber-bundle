@@ -4,8 +4,13 @@ import { app, safeStorage, shell } from 'electron';
 import { getDeviceIdFilePath } from './gliner';
 import { computeDeviceId, getMachineId } from './deviceId';
 
+// Packaged builds (dmg) talk to production; `npm run dev` (unpackaged) talks
+// to the local service. An explicit IDSCRUB_SERVICE_URL still overrides both.
 const SERVICE_BASE =
-  process.env.IDSCRUB_SERVICE_URL ?? 'http://localhost:3030/api';
+  process.env.IDSCRUB_SERVICE_URL ??
+  (app.isPackaged
+    ? 'https://www.identityscrubber.com/api'
+    : 'http://localhost:3030/api');
 const CONSUME_URL =
   process.env.IDSCRUB_CONSUME_URL ?? `${SERVICE_BASE}/consume`;
 const BALANCE_URL =
