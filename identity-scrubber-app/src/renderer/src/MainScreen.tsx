@@ -166,14 +166,32 @@ interface LicenseView {
 
 function QuotaBadge({
   balance,
+  error,
+  onRetry,
   onBuy,
   onShowDetails,
 }: {
   balance: QuotaBadgeBalance | null;
+  error: string | null;
+  onRetry: () => void;
   onBuy: () => void;
   onShowDetails: () => void;
 }): JSX.Element {
   if (!balance) {
+    // A failed load (no balance returned) shows a clickable error chip rather
+    // than sitting on the "Quota…" loading state forever.
+    if (error) {
+      return (
+        <button
+          type="button"
+          onClick={onRetry}
+          title={`Couldn't load quota (${error}). Click to retry.`}
+          className="text-xs px-2 py-1 rounded-md bg-destructive/10 border border-destructive/40 text-destructive hover:bg-destructive/20 transition-colors cursor-pointer"
+        >
+          Quota unavailable · retry
+        </button>
+      );
+    }
     return (
       <span className="text-xs text-muted-foreground px-2 py-1 rounded-md bg-secondary border border-border">
         Quota…
@@ -474,7 +492,8 @@ export function MainScreen(): JSX.Element {
       | 'offline_state_missing'
       | 'offline_lease_expired'
       | 'offline_ceiling_reached'
-      | 'offline_unavailable';
+      | 'offline_unavailable'
+      | 'secure_storage_unavailable';
     requested: number;
     free_daily?: { usage: number; granted: number; resets_at?: string };
     free_week1?: { usage: number; granted: number; expires_at?: string };
@@ -490,6 +509,9 @@ export function MainScreen(): JSX.Element {
     free_week1?: { usage: number; granted: number; expires_at?: string };
     prepaid?: { usage: number; granted: number } | null;
   } | null>(null);
+  // Reason/error string when the balance couldn't be loaded, so the badge can
+  // show an actionable error instead of a permanent "Quota…" loading state.
+  const [balanceError, setBalanceError] = useState<string | null>(null);
 
   // Server tells us when it had to charge a "missing offline_lease report"
   // penalty (see billing.service.ts). We show a dismissable banner the first
@@ -520,6 +542,16 @@ export function MainScreen(): JSX.Element {
     const r = await window.billing.balance();
     if (r.free_daily || r.free_week1 || r.prepaid !== undefined) {
       setBalance({ free_daily: r.free_daily, free_week1: r.free_week1, prepaid: r.prepaid });
+      setBalanceError(null);
+    } else if (!r.ok) {
+      // No balance came back — surface it on the badge instead of leaving it
+      // stuck on the "Quota…" loading state forever.
+      setBalanceError(r.reason ?? r.error ?? 'unavailable');
+    }
+    // If secure storage can't be read, tell the user up front rather than
+    // waiting for a scrub to fail — the app can't track usage without it.
+    if (!r.ok && r.reason === 'secure_storage_unavailable') {
+      setPaywall({ reason: 'secure_storage_unavailable', requested: 0, error: r.error });
     }
     notePenalty(r.offline_penalty);
   };
@@ -975,6 +1007,8 @@ export function MainScreen(): JSX.Element {
           <div className="ml-auto flex items-center gap-2">
             <QuotaBadge
               balance={balance}
+              error={balanceError}
+              onRetry={() => void refreshBalance()}
               onBuy={() => setBuyOpen(true)}
               onShowDetails={() => void openDetails()}
             />
@@ -1621,14 +1655,16 @@ export function MainScreen(): JSX.Element {
                 ? 'Not enough pages'
                 : paywall.reason === 'invalid_device'
                   ? 'Device verification failed'
-                  : paywall.reason === 'offline_ceiling_reached'
-                    ? 'Offline quota exhausted'
-                    : paywall.reason === 'offline_lease_expired'
-                      ? 'Offline quota expired'
-                      : paywall.reason === 'offline_state_missing' ||
-                          paywall.reason === 'offline_unavailable'
-                        ? 'Offline quota unavailable'
-                        : 'Quota service unavailable'}
+                  : paywall.reason === 'secure_storage_unavailable'
+                    ? 'Keychain access needed'
+                    : paywall.reason === 'offline_ceiling_reached'
+                      ? 'Offline quota exhausted'
+                      : paywall.reason === 'offline_lease_expired'
+                        ? 'Offline quota expired'
+                        : paywall.reason === 'offline_state_missing' ||
+                            paywall.reason === 'offline_unavailable'
+                          ? 'Offline quota unavailable'
+                          : 'Quota service unavailable'}
             </h3>
 
             {paywall.reason === 'insufficient_balance' && (
@@ -1677,6 +1713,15 @@ export function MainScreen(): JSX.Element {
               <p className="text-sm text-muted-foreground">
                 We couldn't verify this device. Try restarting the app, or contact support if this
                 keeps happening.
+              </p>
+            )}
+
+            {paywall.reason === 'secure_storage_unavailable' && (
+              <p className="text-sm text-muted-foreground">
+                Identity Scrubber needs access to your Mac's Keychain to securely track your usage.
+                Please reopen the app and click <span className="font-medium">Always Allow</span> when
+                macOS asks for Keychain access. If you previously clicked Deny, open Keychain Access,
+                delete the “identity-scrubber-app Safe Storage” item, then restart the app.
               </p>
             )}
 

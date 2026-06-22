@@ -130,7 +130,8 @@ export type OfflineConsumeReason =
   | 'offline_state_missing'
   | 'offline_lease_expired'
   | 'offline_ceiling_reached'
-  | 'offline_unavailable';
+  | 'offline_unavailable'
+  | 'secure_storage_unavailable';
 
 export interface OfflinePenalty {
   charged: number;

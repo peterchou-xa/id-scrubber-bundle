@@ -77,7 +77,8 @@ export type OfflineConsumeReason =
   | 'offline_state_missing'
   | 'offline_lease_expired'
   | 'offline_ceiling_reached'
-  | 'offline_unavailable';
+  | 'offline_unavailable'
+  | 'secure_storage_unavailable';
 
 export interface OfflinePenalty {
   charged: number;
@@ -144,6 +145,20 @@ function ensureBillingDir(): void {
   fs.mkdirSync(billingDir(), { recursive: true });
 }
 
+// Thrown when local billing state exists but we can't read or write it because
+// the OS secure store is locked or the user denied Keychain access. This must
+// NOT be treated like "no state": silently dropping the lease makes the client
+// stop reporting its offline_lease, which the server reads as an abandoned
+// lease and answers with a penalty on every sync. Callers convert this into a
+// 'secure_storage_unavailable' reason so the UI can ask for access instead of
+// proceeding or getting penalised.
+class KeychainUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'KeychainUnavailableError';
+  }
+}
+
 function isValidLease(v: unknown): v is Lease {
   if (!v || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
@@ -157,10 +172,22 @@ function isValidLease(v: unknown): v is Lease {
 
 function readState(): LocalState | null {
   const p = statePath();
+  // No file yet: a genuine "no local state" (brand-new device / fresh install).
+  // The caller should proceed online, not treat this as an error.
   if (!fs.existsSync(p)) return null;
-  if (!safeStorage.isEncryptionAvailable()) return null;
+  // A file exists but the Keychain is locked or access was denied. This is NOT
+  // "no state" — see KeychainUnavailableError. Surface it so the caller stops
+  // and asks for access instead of dropping the lease and getting penalised.
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new KeychainUnavailableError('secure storage is not available');
+  }
+  let plain: string;
   try {
-    const plain = safeStorage.decryptString(fs.readFileSync(p));
+    plain = safeStorage.decryptString(fs.readFileSync(p));
+  } catch (err) {
+    throw new KeychainUnavailableError((err as Error).message);
+  }
+  try {
     const obj = JSON.parse(plain) as LocalState;
     if (
       isValidLease(obj?.lease) &&
@@ -170,6 +197,8 @@ function readState(): LocalState | null {
     ) {
       return obj;
     }
+    // Decrypted fine but the contents are malformed — genuine corruption, not a
+    // Keychain problem. Treat as no usable state.
     return null;
   } catch {
     return null;
@@ -177,9 +206,20 @@ function readState(): LocalState | null {
 }
 
 function writeState(state: LocalState): void {
-  if (!safeStorage.isEncryptionAvailable()) return;
+  // Can't persist without secure storage. Fail loudly: silently skipping the
+  // write leaves the lease unsaved, so the next sync reports no lease and the
+  // server penalises us — the bug this whole error path exists to prevent.
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new KeychainUnavailableError('secure storage is not available');
+  }
   ensureBillingDir();
-  fs.writeFileSync(statePath(), safeStorage.encryptString(JSON.stringify(state)));
+  let payload: Buffer;
+  try {
+    payload = safeStorage.encryptString(JSON.stringify(state));
+  } catch (err) {
+    throw new KeychainUnavailableError((err as Error).message);
+  }
+  fs.writeFileSync(statePath(), payload);
 }
 
 // Called after every successful server response.
@@ -251,7 +291,32 @@ function readDeviceId(): string {
 // Network calls
 // ---------------------------------------------------------------------------
 
+// Runs a billing call and turns any KeychainUnavailableError into a normal
+// 'secure_storage_unavailable' response, so the renderer can ask for Keychain
+// access instead of the app proceeding or getting penalised. Keeps the call
+// bodies to a single (network) try/catch each.
+async function guardKeychain<T>(
+  run: () => Promise<T>,
+  onUnavailable: (message: string) => T,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (err instanceof KeychainUnavailableError) return onUnavailable(err.message);
+    throw err;
+  }
+}
+
 export async function fetchBalance(
+  opts?: { includeLicenses?: boolean },
+): Promise<BalanceResponse> {
+  return guardKeychain(
+    () => fetchBalanceInner(opts),
+    (message) => ({ ok: false, reason: 'secure_storage_unavailable', error: message }),
+  );
+}
+
+async function fetchBalanceInner(
   opts?: { includeLicenses?: boolean },
 ): Promise<BalanceResponse> {
   const body: Record<string, unknown> = {
@@ -279,6 +344,10 @@ export async function fetchBalance(
     });
     return { ...parsed, source: 'online' };
   } catch (err) {
+    // A Keychain failure must not be mistaken for a network error and routed
+    // into the offline cache (which needs the same Keychain anyway) — let it
+    // propagate to guardKeychain.
+    if (err instanceof KeychainUnavailableError) throw err;
     return offlineBalanceView((err as Error).message);
   }
 }
@@ -366,6 +435,13 @@ export async function redeemLicenseKey(licenseKey: string): Promise<RedeemResult
 }
 
 export async function consumePages(pages: number): Promise<ConsumeResponse> {
+  return guardKeychain(
+    () => consumePagesInner(pages),
+    (message) => ({ allow: false, reason: 'secure_storage_unavailable', error: message }),
+  );
+}
+
+async function consumePagesInner(pages: number): Promise<ConsumeResponse> {
   const body: Record<string, unknown> = {
     machine_id: getMachineId(),
     device_id: readDeviceId(),
@@ -393,6 +469,9 @@ export async function consumePages(pages: number): Promise<ConsumeResponse> {
     });
     return { ...parsed, source: 'online' };
   } catch (err) {
+    // Don't let a Keychain failure fall through to the offline path (it relies
+    // on the same Keychain) — let it propagate to guardKeychain.
+    if (err instanceof KeychainUnavailableError) throw err;
     return tryOfflineConsume(pages, (err as Error).message);
   }
 }
@@ -442,9 +521,9 @@ function applyOfflineUsage(state: LocalState): {
 // frozen per-bucket snapshot from the last sync, the offline budget
 // remaining, and synced_at so the UI can say "last synced X ago".
 function offlineBalanceView(networkError: string): BalanceResponse {
-  if (!safeStorage.isEncryptionAvailable()) {
-    return { ok: false, reason: 'network_error', error: networkError };
-  }
+  // readState() throws KeychainUnavailableError if we have state we can't get
+  // into; guardKeychain converts that. A null return here means there's simply
+  // no cached state to fall back on.
   const state = readState();
   if (!state) {
     return { ok: false, reason: 'offline_state_missing', error: networkError };
@@ -478,10 +557,9 @@ function offlineBalanceView(networkError: string): BalanceResponse {
 }
 
 function tryOfflineConsume(pages: number, networkError: string): ConsumeResponse {
-  if (!safeStorage.isEncryptionAvailable()) {
-    return { allow: false, reason: 'network_error', error: networkError };
-  }
-
+  // readState()/writeState() throw KeychainUnavailableError if secure storage
+  // can't be used; guardKeychain converts that. A null read means there's no
+  // cached lease to consume against.
   const state = readState();
   if (!state) {
     return { allow: false, reason: 'offline_state_missing', error: networkError };

@@ -9,7 +9,7 @@ import {
   GlinerStatus,
 } from './gliner';
 import { scrubberService, ServeEvent } from './scrubber';
-import { loadIdentifiers, saveIdentifiers } from './identifiersStore';
+import { loadIdentifiers, saveIdentifiers, type Identifier } from './identifiersStore';
 import { recordScrubEvent } from './metrics';
 import {
   consumePages,
@@ -18,6 +18,15 @@ import {
   startCheckout,
   type Tier,
 } from './billing';
+
+// Dev runs use a separate app name so their encrypted state (the userData dir)
+// and safeStorage Keychain item ("<name> Safe Storage") are fully isolated from
+// the packaged build. Otherwise both share one item/key and lock each other out
+// — the dev binary is ad-hoc signed and can't reliably reclaim a prod-owned key.
+// Must run before any app.getPath('userData') or safeStorage access.
+if (!app.isPackaged) {
+  app.setName('identity-scrubber-app-dev');
+}
 
 let mainWindow: BrowserWindow | null = null;
 let downloadInFlight = false;
@@ -259,7 +268,7 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('identifiers:save', async (_evt, values: string[]) => {
+  ipcMain.handle('identifiers:save', async (_evt, values: Identifier[]) => {
     try {
       await saveIdentifiers(values);
       return { ok: true };
