@@ -1718,10 +1718,9 @@ export function MainScreen(): JSX.Element {
 
             {paywall.reason === 'secure_storage_unavailable' && (
               <p className="text-sm text-muted-foreground">
-                Identity Scrubber needs access to your Mac's Keychain to securely track your usage.
-                Please reopen the app and click <span className="font-medium">Always Allow</span> when
-                macOS asks for Keychain access. If you previously clicked Deny, open Keychain Access,
-                delete the “identity-scrubber-app Safe Storage” item, then restart the app.
+                Identity Scrubber couldn't access your Mac's Keychain, which it uses to securely
+                track your usage. Please restart the app and try again. If this keeps happening,
+                contact support.
               </p>
             )}
 
