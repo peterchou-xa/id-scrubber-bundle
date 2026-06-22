@@ -46,7 +46,7 @@ export class PolarService {
     return s;
   }
 
-  // One Polar product per tier. Unlike Lemon Squeezy, the same product UUID is
+  // One Polar product per tier. The same product UUID is
   // used both to create the checkout and to identify the order in the webhook,
   // so a single map covers both directions.
   private productIdFor(tier: Tier): string {

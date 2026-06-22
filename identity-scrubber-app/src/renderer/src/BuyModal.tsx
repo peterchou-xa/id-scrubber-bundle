@@ -146,7 +146,7 @@ export function BuyModal({
             </div>
             <p className="text-xs text-muted-foreground">
               Checkout opens in your browser. Pages appear here automatically once
-              Lemon Squeezy confirms the purchase.
+              Polar confirms the purchase.
             </p>
             <div className="flex justify-end gap-2">
               <button

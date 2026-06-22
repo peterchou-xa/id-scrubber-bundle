@@ -32,7 +32,7 @@ What's missing — and what this doc specifies — is **how a prepaid row gets c
 
 ## Polar setup
 
-The design shape is provider-agnostic Merchant of Record: Polar collects payment, handles tax, and we never touch the card — the same trust model the original Lemon Squeezy design relied on.
+The design shape is provider-agnostic Merchant of Record: Polar collects payment, handles tax, and we never touch the card.
 
 **Sandbox for now.** `POLAR_SERVER=sandbox` points the SDK at `https://sandbox-api.polar.sh`. Production is the same code path — set `POLAR_SERVER=production` and swap the `POLAR_*` values at deploy time. Access tokens, products, and webhook secrets are **fully separated** between sandbox and production; a production token will not authenticate against sandbox.
 
@@ -46,7 +46,7 @@ Three one-time purchase products, one per tier from the base design:
 | Pro     | `POLAR_PRODUCT_PRO`     | $19 | 500  | `1c2fe4bf-c877-476a-9095-5c3cf9ed5b61` |
 | Max     | `POLAR_PRODUCT_MAX`     | $49 | 2000 | `1ed4867c-bdf9-4a20-b9e7-a3234e04eb2c` |
 
-The price + page count live in code (`TIER_PAGES`, `TIER_PRICE_CENTS`, already defined). Unlike Lemon Squeezy — which split a hosted-checkout UUID from a separate numeric product_id — **Polar uses one product UUID** for both creating the checkout and mapping the webhook order back to a tier. So a single env var per tier covers both directions.
+The price + page count live in code (`TIER_PAGES`, `TIER_PRICE_CENTS`, already defined). **Polar uses one product UUID** for both creating the checkout and mapping the webhook order back to a tier. So a single env var per tier covers both directions.
 
 ### Webhook
 
@@ -135,7 +135,7 @@ Polar checkout sessions are created via its API, which requires the `POLAR_ACCES
 3. **Tier validation before the user pays.** Server rejects unknown/retired tiers up front.
 4. **Natural choke point for telemetry / rate limiting.**
 
-(Lemon Squeezy offered a static buy-link alternative with no API key; Polar does not, so the server round-trip isn't optional here — but we wanted it anyway for the reasons above.)
+(Polar has no static buy-link alternative, so the server round-trip isn't optional here — but we wanted it anyway for the reasons above.)
 
 ### Why the redirect doesn't grant
 
@@ -189,7 +189,7 @@ async function handleOrderPaid(order) {
 }
 ```
 
-This is the key departure from the Lemon Squeezy design: LS passed the tier in `custom_data` and used the order amount as the anti-tamper check. Polar's `order.paid` carries `product_id` directly, so we derive the tier from it (authoritative) and skip the amount gate (which MoR tax would break anyway).
+Polar's `order.paid` carries `product_id` directly, so we derive the tier from it (authoritative) and skip any order-amount anti-tamper gate (which MoR tax would break anyway).
 
 ### `grantPrepaid`
 
@@ -229,7 +229,7 @@ The `ON CONFLICT` upsert makes "first purchase" vs. "Nth purchase" indistinguish
 
 ## Recovery when a webhook is missed
 
-There is **no self-serve redeem flow in v1.** The license-key + manual-redeem machinery from the earlier Lemon Squeezy design (a separate `license_key_created` event, a 120s race window, a `validate` fallback, an in-memory rate limiter, and a `POST /redeem-license-key` endpoint) is **removed**. That machinery existed to compensate for LS delivering keys in a separate event and occasionally losing `order_created`. Polar's `order.paid` alone grants reliably, and we have no customers yet, so the safety net is overkill.
+There is **no self-serve redeem flow in v1.** An earlier license-key + manual-redeem machinery (a separate `license_key_created` event, a 120s race window, a `validate` fallback, an in-memory rate limiter, and a `POST /redeem-license-key` endpoint) is **removed**. That machinery existed to compensate for keys being delivered in a separate event and occasional loss of `order_created`. Polar's `order.paid` alone grants reliably, and we have no customers yet, so the safety net is overkill.
 
 If a webhook is missed, recovery in order of effort:
 
@@ -265,7 +265,7 @@ startCheckout(tier: 'starter' | 'pro' | 'max'): Promise<StartCheckoutResult>;
 | `POST` | `/api/checkout-url`  | Resolve `(machine_id, device_id)` → `account_id`, create a Polar checkout embedding it in metadata, return `{ url, test_mode }`. |
 | `POST` | `/api/polar/webhook` | Receive `order.paid`. Verify the Standard Webhooks signature. Idempotent grant. |
 
-`/consume` and `/balance` are unchanged in shape; they just see prepaid balance grow when grants land. (`/redeem-license-key` and `/license-info` from the LS design are removed.)
+`/consume` and `/balance` are unchanged in shape; they just see prepaid balance grow when grants land. (`/redeem-license-key` and `/license-info` from an earlier design are removed.)
 
 ## What this defends against
 

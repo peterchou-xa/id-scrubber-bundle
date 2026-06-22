@@ -125,7 +125,7 @@ Prepaid integration adds `provider_order_id` (Polar order ID, unique for idempot
 A `purchases` row is inserted on:
 - Account creation: two rows — the initial `free_week1` grant of 20 pages, and the initial `free_daily` grant of 1 page.
 - Each daily `free_daily` self-refill (one row per day with `quota_total = 1`).
-- Each prepaid purchase (one row per LS order with `quota_total = tier.pages`).
+- Each prepaid purchase (one row per order with `quota_total = tier.pages`).
 
 For "X of Y" display:
 - Free current total = `quota_total` of the latest `purchases` row matching the active free SKU.
