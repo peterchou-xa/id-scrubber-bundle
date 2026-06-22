@@ -1,8 +1,4 @@
-import { app, safeStorage } from 'electron';
-import { promises as fs } from 'fs';
-import path from 'path';
-
-const FILE_NAME = 'identifiers.json';
+import { readSecure, writeSecure } from './secureStore';
 
 export type IdentifierType = 'name' | 'ssn' | 'dob' | 'email' | 'address' | 'other';
 
@@ -12,13 +8,6 @@ export interface Identifier {
 }
 
 const VALID_TYPES: IdentifierType[] = ['name', 'ssn', 'dob', 'email', 'address', 'other'];
-
-type StoredFile = {
-  version: 1;
-  encrypted: boolean;
-  // base64 of the encrypted buffer when encrypted=true; raw JSON string when false.
-  payload: string;
-};
 
 function normalize(arr: unknown): Identifier[] {
   if (!Array.isArray(arr)) return [];
@@ -41,37 +30,20 @@ function normalize(arr: unknown): Identifier[] {
   });
 }
 
-function filePath(): string {
-  return path.join(app.getPath('userData'), FILE_NAME);
-}
-
+// Stored as raw safeStorage bytes at models/identifiers.enc. readSecure throws
+// KeychainUnavailableError if the Keychain is denied (surfaced by the IPC
+// handler); a null return means there's simply nothing saved yet.
 export async function loadIdentifiers(): Promise<Identifier[]> {
+  const json = readSecure('identifiers');
+  if (json === null) return [];
   try {
-    const raw = await fs.readFile(filePath(), 'utf8');
-    const parsed = JSON.parse(raw) as StoredFile;
-    let json: string;
-    if (parsed.encrypted) {
-      if (!safeStorage.isEncryptionAvailable()) {
-        throw new Error('safeStorage not available to decrypt identifiers');
-      }
-      json = safeStorage.decryptString(Buffer.from(parsed.payload, 'base64'));
-    } else {
-      json = parsed.payload;
-    }
     return normalize(JSON.parse(json));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
-    throw err;
+  } catch {
+    return [];
   }
 }
 
 export async function saveIdentifiers(values: Identifier[]): Promise<void> {
   const cleaned = normalize(values);
-  const json = JSON.stringify(cleaned);
-  const useEncryption = safeStorage.isEncryptionAvailable();
-  const stored: StoredFile = useEncryption
-    ? { version: 1, encrypted: true, payload: safeStorage.encryptString(json).toString('base64') }
-    : { version: 1, encrypted: false, payload: json };
-  await fs.mkdir(path.dirname(filePath()), { recursive: true });
-  await fs.writeFile(filePath(), JSON.stringify(stored), 'utf8');
+  writeSecure('identifiers', JSON.stringify(cleaned));
 }

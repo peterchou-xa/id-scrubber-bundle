@@ -1,23 +1,18 @@
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
-import { app, net } from 'electron';
+import { app, net, safeStorage } from 'electron';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
-import { getMachineId, readOrCreateDeviceIdFile } from './deviceId';
+import { securePath } from './secureStore';
+import { ensureDeviceId } from './deviceIdStore';
 
 export const GLINER_REPO = 'peterchou26/gliner-pii-onnx';
 export const GLINER_MODEL_FILE = 'model_fp16.onnx';
-export const DEVICE_ID_FILE = 'device-id';
 
 // All files that must exist locally for the python serve loop to start.
 // `model_fp16.onnx` references `model_fp16.onnx_data` by relative path, so
 // they MUST live in the same directory.
-//
-// `device-id` is locally generated (not downloaded). Including it in
-// REQUIRED_FILES means deleting it forces a full model re-download, which is
-// the multi-minute penalty that gates the "delete device-id to wipe quota"
-// abuse vector.
 const DOWNLOAD_FILES = [
   'model_fp16.onnx',
   'model_fp16.onnx_data',
@@ -25,8 +20,6 @@ const DOWNLOAD_FILES = [
   'tokenizer.json',
   'tokenizer_config.json',
 ];
-
-const REQUIRED_FILES = [...DOWNLOAD_FILES, DEVICE_ID_FILE];
 
 export type GlinerProgress =
   | { stage: 'checking' }
@@ -72,13 +65,21 @@ async function fileExistsNonEmpty(p: string): Promise<boolean> {
 export async function isGlinerCached(): Promise<boolean> {
   const dir = getGlinerModelDir();
   const checks = await Promise.all(
-    REQUIRED_FILES.map((f) => fileExistsNonEmpty(path.join(dir, f))),
+    DOWNLOAD_FILES.map((f) => fileExistsNonEmpty(path.join(dir, f))),
   );
-  return checks.every(Boolean);
+  if (!checks.every(Boolean)) return false;
+  // device-id.enc is locally generated (not downloaded); deleting it still
+  // forces a full model re-download — the multi-minute penalty gating the
+  // "delete device-id to wipe quota" abuse vector. Only require it when secure
+  // storage is available, since otherwise we can't create it (and would loop).
+  if (safeStorage.isEncryptionAvailable()) {
+    return fileExistsNonEmpty(getDeviceIdFilePath());
+  }
+  return true;
 }
 
 export function getDeviceIdFilePath(): string {
-  return path.join(getGlinerModelDir(), DEVICE_ID_FILE);
+  return securePath('device-id');
 }
 
 export async function getGlinerStatus(): Promise<GlinerStatus> {
@@ -228,10 +229,11 @@ export async function ensureGlinerModel(
     });
   }
 
-  // Generate the device-id file alongside the model. Source of truth lives in
-  // this file from this moment on; later launches read it rather than
-  // recomputing from machine_id.
-  readOrCreateDeviceIdFile(path.join(dir, DEVICE_ID_FILE), getMachineId());
+  // Generate the encrypted device-id (models/device-id.enc) alongside the
+  // model. Its presence gates re-download (anti-abuse); the value is
+  // deterministic from machine_id, so billing can recompute it if secure
+  // storage is ever denied.
+  ensureDeviceId();
 
   onProgress({ stage: 'done', dir });
   return dir;

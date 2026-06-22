@@ -62,13 +62,3 @@ export function getMachineId(): string {
   cachedMachineId = raw;
   return raw;
 }
-
-export function readOrCreateDeviceIdFile(filePath: string, machineId: string): string {
-  if (fs.existsSync(filePath)) {
-    const v = fs.readFileSync(filePath, 'utf8').trim().toLowerCase();
-    if (/^[0-9a-f]{64}$/.test(v)) return v;
-  }
-  const value = computeDeviceId(machineId);
-  fs.writeFileSync(filePath, value, { encoding: 'utf8' });
-  return value;
-}

@@ -1,8 +1,7 @@
-import fs from 'fs';
-import path from 'path';
-import { app, safeStorage, shell } from 'electron';
-import { getDeviceIdFilePath } from './gliner';
-import { computeDeviceId, getMachineId } from './deviceId';
+import { app, shell } from 'electron';
+import { KeychainUnavailableError, readSecure, writeSecure } from './secureStore';
+import { getMachineId } from './deviceId';
+import { readDeviceId } from './deviceIdStore';
 
 // Packaged builds (dmg) talk to production; `npm run dev` (unpackaged) talks
 // to the local service. An explicit IDSCRUB_SERVICE_URL still overrides both.
@@ -132,32 +131,8 @@ export interface BalanceResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Local state (safeStorage-encrypted, single file)
+// Local state (safeStorage-encrypted, raw bytes at models/billing.enc)
 // ---------------------------------------------------------------------------
-
-function billingDir(): string {
-  return path.join(app.getPath('userData'), 'billing');
-}
-function statePath(): string {
-  return path.join(billingDir(), 'state.enc');
-}
-function ensureBillingDir(): void {
-  fs.mkdirSync(billingDir(), { recursive: true });
-}
-
-// Thrown when local billing state exists but we can't read or write it because
-// the OS secure store is locked or the user denied Keychain access. This must
-// NOT be treated like "no state": silently dropping the lease makes the client
-// stop reporting its offline_lease, which the server reads as an abandoned
-// lease and answers with a penalty on every sync. Callers convert this into a
-// 'secure_storage_unavailable' reason so the UI can ask for access instead of
-// proceeding or getting penalised.
-class KeychainUnavailableError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'KeychainUnavailableError';
-  }
-}
 
 function isValidLease(v: unknown): v is Lease {
   if (!v || typeof v !== 'object') return false;
@@ -171,22 +146,12 @@ function isValidLease(v: unknown): v is Lease {
 }
 
 function readState(): LocalState | null {
-  const p = statePath();
-  // No file yet: a genuine "no local state" (brand-new device / fresh install).
-  // The caller should proceed online, not treat this as an error.
-  if (!fs.existsSync(p)) return null;
-  // A file exists but the Keychain is locked or access was denied. This is NOT
-  // "no state" — see KeychainUnavailableError. Surface it so the caller stops
-  // and asks for access instead of dropping the lease and getting penalised.
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new KeychainUnavailableError('secure storage is not available');
-  }
-  let plain: string;
-  try {
-    plain = safeStorage.decryptString(fs.readFileSync(p));
-  } catch (err) {
-    throw new KeychainUnavailableError((err as Error).message);
-  }
+  // null = no file yet (brand-new device / fresh install) — proceed online.
+  // A Keychain failure throws KeychainUnavailableError instead, so we never
+  // mistake "denied" for "no state" (which would drop the lease and trigger a
+  // server penalty on every sync).
+  const plain = readSecure('billing');
+  if (plain === null) return null;
   try {
     const obj = JSON.parse(plain) as LocalState;
     if (
@@ -206,20 +171,10 @@ function readState(): LocalState | null {
 }
 
 function writeState(state: LocalState): void {
-  // Can't persist without secure storage. Fail loudly: silently skipping the
-  // write leaves the lease unsaved, so the next sync reports no lease and the
-  // server penalises us — the bug this whole error path exists to prevent.
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new KeychainUnavailableError('secure storage is not available');
-  }
-  ensureBillingDir();
-  let payload: Buffer;
-  try {
-    payload = safeStorage.encryptString(JSON.stringify(state));
-  } catch (err) {
-    throw new KeychainUnavailableError((err as Error).message);
-  }
-  fs.writeFileSync(statePath(), payload);
+  // Throws KeychainUnavailableError if secure storage can't be used. Failing
+  // loudly is intentional: silently skipping leaves the lease unsaved, so the
+  // next sync reports no lease and the server penalises us.
+  writeSecure('billing', JSON.stringify(state));
 }
 
 // Called after every successful server response.
@@ -272,19 +227,6 @@ function pendingOfflineLeasePayload(): { issued_at: string; used: number } | und
   const state = readState();
   if (!state) return undefined;
   return { issued_at: state.lease.issued_at, used: state.offline_used };
-}
-
-// ---------------------------------------------------------------------------
-// Device identity (unchanged)
-// ---------------------------------------------------------------------------
-
-function readDeviceId(): string {
-  const p = getDeviceIdFilePath();
-  if (fs.existsSync(p)) {
-    const v = fs.readFileSync(p, 'utf8').trim().toLowerCase();
-    if (/^[0-9a-f]{64}$/.test(v)) return v;
-  }
-  return computeDeviceId(getMachineId());
 }
 
 // ---------------------------------------------------------------------------
