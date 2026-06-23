@@ -1,5 +1,44 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { BuyModal } from './BuyModal';
+
+/**
+ * A trigger wrapped with a styled hover/focus tooltip ("info widget"). The
+ * tooltip appears below the trigger on hover or keyboard focus. Pass
+ * `disabled` to suppress it (e.g. while a related editor/modal is open).
+ */
+function InfoHint({
+  hint,
+  disabled = false,
+  className,
+  children,
+}: {
+  hint: ReactNode;
+  disabled?: boolean;
+  className?: string;
+  children: ReactNode;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  return (
+    <div
+      className={'relative' + (className ? ' ' + className : '')}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      onFocus={() => setOpen(true)}
+      onBlur={() => setOpen(false)}
+    >
+      {children}
+      {open && !disabled && (
+        <div
+          role="tooltip"
+          className="absolute left-0 top-full mt-1.5 z-20 w-64 px-3 py-2 bg-secondary border border-border text-foreground text-xs leading-relaxed rounded-lg shadow-md pointer-events-none"
+        >
+          {hint}
+        </div>
+      )}
+    </div>
+  );
+}
 
 type IdentifierType = 'name' | 'ssn' | 'dob' | 'email' | 'address' | 'other';
 
@@ -137,7 +176,37 @@ const ICONS = {
   x: 'M18 6 6 18 M6 6l12 12',
   edit: 'M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z',
   refresh: 'M23 4v6h-6 M1 20v-6h6 M3.51 9a9 9 0 0 1 14.85-3.36L23 10 M20.49 15a9 9 0 0 1-14.85 3.36L1 14',
+  chevronLeft: 'M15 18l-6-6 6-6',
+  chevronRight: 'M9 18l6-6-6-6',
 };
+
+function NavButton({
+  dir,
+  onClick,
+  disabled,
+  label,
+}: {
+  dir: 'prev' | 'next';
+  onClick: () => void;
+  disabled: boolean;
+  label: string;
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+      className="flex items-center justify-center w-7 h-7 rounded-md border border-border bg-secondary hover:bg-secondary/60 hover:border-foreground/30 disabled:opacity-30 disabled:hover:bg-secondary disabled:hover:border-border disabled:cursor-default transition-colors cursor-pointer"
+    >
+      <Icon
+        path={dir === 'prev' ? ICONS.chevronLeft : ICONS.chevronRight}
+        className="w-4 h-4"
+      />
+    </button>
+  );
+}
 
 const HIGHLIGHT_COLORS = {
   red: { base: '#DC2626', label: 'Red' },
@@ -226,26 +295,27 @@ function QuotaBadge({
           .join(' · ')
       }
     >
-      <button
-        type="button"
-        onClick={onShowDetails}
-        title="Show balance details"
-        aria-label="Show balance details"
-        className="flex items-center gap-2 cursor-pointer rounded -my-1 -mx-1 py-1 px-1 hover:bg-foreground/5 focus:outline-none transition-colors"
-      >
-        <span className="font-medium">{total} pages left</span>
-        <span className="text-muted-foreground">
-          (
-          {[
-            `${dailyLeft} free today`,
-            showW1 && w1 ? `${w1Left} week one bonus` : null,
-            prepaid ? `${prepaidLeft} prepaid` : null,
-          ]
-            .filter(Boolean)
-            .join(' · ')}
-          )
-        </span>
-      </button>
+      <InfoHint hint="Show balance details">
+        <button
+          type="button"
+          onClick={onShowDetails}
+          aria-label="Show balance details"
+          className="flex items-center gap-2 cursor-pointer rounded -my-1 -mx-1 py-1 px-1 hover:bg-foreground/5 focus:outline-none transition-colors"
+        >
+          <span className="font-medium">{total} pages left</span>
+          <span className="text-muted-foreground">
+            (
+            {[
+              `${dailyLeft} free today`,
+              showW1 && w1 ? `${w1Left} week one bonus` : null,
+              prepaid ? `${prepaidLeft} prepaid` : null,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+            )
+          </span>
+        </button>
+      </InfoHint>
       <button
         type="button"
         onClick={onBuy}
@@ -470,11 +540,17 @@ export function MainScreen(): JSX.Element {
   const [scrubbedPath, setScrubbedPath] = useState<string>('');
   const [pages, setPages] = useState<Map<number, PageInfo>>(new Map());
   const [hoveredValue, setHoveredValue] = useState<string | null>(null);
+  // A value the user clicked to "pin" — the preview then locks onto it and the
+  // header shows a stepper to walk through each of its occurrences. Hover is a
+  // transient peek; pinning survives moving the mouse into the preview.
+  const [pinnedValue, setPinnedValue] = useState<string | null>(null);
+  const [pinnedMatchIndex, setPinnedMatchIndex] = useState(0);
+  // Which document page the preview shows while just browsing (nothing pinned
+  // or hovered) — an index into the sorted list of available pages.
+  const [browsePageIndex, setBrowsePageIndex] = useState(0);
   const [highlightColor, setHighlightColor] = useState<HighlightColor>('red');
   const [colorPickerOpen, setColorPickerOpen] = useState(false);
   const [detectStatus, setDetectStatus] = useState<DetectStatus | null>(null);
-  const [identifiersHintOpen, setIdentifiersHintOpen] = useState(false);
-  const [scanHintOpen, setScanHintOpen] = useState(false);
   const [identifiersOpen, setIdentifiersOpen] = useState(false);
   const [identifiers, setIdentifiers] = useState<Identifier[]>([]);
   const [identifiersDraft, setIdentifiersDraft] = useState<Identifier[]>([
@@ -653,6 +729,31 @@ export function MainScreen(): JSX.Element {
     setScanIdentifiersOpen(false);
   };
 
+  const togglePin = (value: string): void => {
+    setPinnedValue((cur) => (cur === value ? null : value));
+    setPinnedMatchIndex(0);
+  };
+
+  // Esc clears the pin (when no modal is handling Esc first).
+  useEffect(() => {
+    if (!pinnedValue) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && !identifiersOpen && !scanIdentifiersOpen) {
+        setPinnedValue(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [pinnedValue, identifiersOpen, scanIdentifiersOpen]);
+
+  // Drop the pin if its value is no longer among the detected items (e.g. after
+  // re-running detection).
+  useEffect(() => {
+    if (pinnedValue && !piiItems.some((p) => p.value === pinnedValue)) {
+      setPinnedValue(null);
+    }
+  }, [piiItems, pinnedValue]);
+
   const handleFileSelect = async (): Promise<void> => {
     const picked = await window.dialogApi.openPdf();
     if (picked) {
@@ -665,6 +766,8 @@ export function MainScreen(): JSX.Element {
       setScrubbedPath('');
       setPages(new Map());
       setHoveredValue(null);
+      setPinnedValue(null);
+      setBrowsePageIndex(0);
       setSelectedFile(picked.name);
       setSelectedFilePath(picked.path);
     }
@@ -834,6 +937,8 @@ export function MainScreen(): JSX.Element {
     setPiiItems([]);
     setPages(new Map());
     setHoveredValue(null);
+    setPinnedValue(null);
+    setBrowsePageIndex(0);
     const customPii = [
       ...identifiers.map((i) => ({ value: i.value, type: i.type })),
       ...scanIdentifiers.map((i) => ({ value: i.value, type: i.type })),
@@ -925,6 +1030,8 @@ export function MainScreen(): JSX.Element {
     setScrubbedPath('');
     setPages(new Map());
     setHoveredValue(null);
+    setPinnedValue(null);
+    setBrowsePageIndex(0);
     setScanIdentifiers([]);
   };
 
@@ -948,23 +1055,65 @@ export function MainScreen(): JSX.Element {
   // highlights. Hovering a PII entry jumps to its page (if different) and
   // emphasizes its boxes.
   const previewPanel = useMemo(() => {
-    const hovered = hoveredValue
-      ? piiItems.find((p) => p.value === hoveredValue)
+    // A pinned value takes over; otherwise the hovered value drives a peek.
+    const activeValue = pinnedValue ?? hoveredValue;
+    const active = activeValue
+      ? piiItems.find((p) => p.value === activeValue)
       : null;
-    const hoveredPage = hovered?.bboxes[0]?.page_num;
-    const pageNum = hoveredPage ?? (pages.size > 0 ? Math.min(...pages.keys()) : null);
+
+    // Every occurrence of the active value, ordered top-to-bottom across pages,
+    // so the stepper walks them in reading order.
+    const activeBboxes = active
+      ? [...active.bboxes].sort(
+          (a, b) => a.page_num - b.page_num || a.y - b.y || a.x - b.x,
+        )
+      : [];
+
+    // When pinned, the stepper picks which occurrence (and therefore page) to
+    // show; when only hovering, peek at the first occurrence's page.
+    const matchIndex = pinnedValue
+      ? Math.min(pinnedMatchIndex, Math.max(0, activeBboxes.length - 1))
+      : 0;
+    const focusedBbox = pinnedValue ? activeBboxes[matchIndex] ?? null : null;
+
+    // All available document pages, in order — used for the browse navigator
+    // when nothing is pinned or hovered.
+    const sortedPages = Array.from(pages.keys()).sort((a, b) => a - b);
+    const browseIndex = Math.min(browsePageIndex, Math.max(0, sortedPages.length - 1));
+    const browsePage = sortedPages[browseIndex] ?? null;
+
+    const pageNum =
+      focusedBbox?.page_num ??
+      activeBboxes[0]?.page_num ??
+      browsePage;
     if (pageNum == null) return null;
     const page = pages.get(pageNum);
     if (!page) return null;
+
     const overlays = piiItems.flatMap((p) =>
       p.checked
         ? p.bboxes
             .filter((b) => b.page_num === pageNum)
-            .map((b) => ({ bbox: b, value: p.value, isHovered: p.value === hoveredValue }))
+            .map((b) => ({
+              bbox: b,
+              value: p.value,
+              isActive: p.value === activeValue,
+              isFocused: b === focusedBbox,
+            }))
         : [],
     );
-    return { page, pageNum, overlays };
-  }, [hoveredValue, piiItems, pages]);
+    return {
+      page,
+      pageNum,
+      overlays,
+      activeValue,
+      activeMatchCount: activeBboxes.length,
+      matchIndex,
+      isPinned: pinnedValue != null && active != null,
+      pageCount: sortedPages.length,
+      browseIndex,
+    };
+  }, [hoveredValue, pinnedValue, pinnedMatchIndex, browsePageIndex, piiItems, pages]);
 
   return (
     <div className="size-full bg-background overflow-hidden relative">
@@ -1087,14 +1236,17 @@ export function MainScreen(): JSX.Element {
 
             {/* Detection inputs: persistent ("My Identifiers") + per-scan one-offs. */}
             <div className="grid grid-cols-2 gap-2">
-              <div className="relative">
+              <InfoHint
+                disabled={identifiersOpen}
+                hint={
+                  <>
+                    <b>Used in every scan.</b> Saved on this device — for things that are always you, like your name, SSN, or date of birth.
+                  </>
+                }
+              >
                 <button
                   type="button"
                   onClick={openIdentifiers}
-                  onMouseEnter={() => setIdentifiersHintOpen(true)}
-                  onMouseLeave={() => setIdentifiersHintOpen(false)}
-                  onFocus={() => setIdentifiersHintOpen(true)}
-                  onBlur={() => setIdentifiersHintOpen(false)}
                   className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1 text-xs font-medium text-primary border border-primary/30 bg-primary/5 hover:bg-primary/10 rounded-md transition-colors cursor-pointer"
                 >
                   <Icon path={ICONS.plus} className="w-3.5 h-3.5" />
@@ -1103,23 +1255,18 @@ export function MainScreen(): JSX.Element {
                     <span className="text-primary/70">({identifiers.length})</span>
                   )}
                 </button>
-                {identifiersHintOpen && !identifiersOpen && (
-                  <div
-                    role="tooltip"
-                    className="absolute left-0 top-full mt-1.5 z-20 w-64 px-3 py-2 bg-secondary border border-border text-foreground text-xs leading-relaxed rounded-lg shadow-md pointer-events-none"
-                  >
-                    <b>Used in every scan.</b> Saved on this device — for things that are always you, like your name, SSN, or date of birth.
-                  </div>
-                )}
-              </div>
-              <div className="relative">
+              </InfoHint>
+              <InfoHint
+                disabled={scanIdentifiersOpen}
+                hint={
+                  <>
+                    <b>Used in this scan only.</b> Not saved — for values specific to this document, like a case number or counterparty name.
+                  </>
+                }
+              >
                 <button
                   type="button"
                   onClick={openScanIdentifiers}
-                  onMouseEnter={() => setScanHintOpen(true)}
-                  onMouseLeave={() => setScanHintOpen(false)}
-                  onFocus={() => setScanHintOpen(true)}
-                  onBlur={() => setScanHintOpen(false)}
                   className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1 text-xs font-medium text-muted-foreground border border-dashed border-border rounded-md hover:text-foreground hover:border-foreground/40 transition-colors cursor-pointer"
                 >
                   <Icon path={ICONS.plus} className="w-3.5 h-3.5" />
@@ -1128,15 +1275,7 @@ export function MainScreen(): JSX.Element {
                     <span className="text-foreground/70">({scanIdentifiers.length})</span>
                   )}
                 </button>
-                {scanHintOpen && !scanIdentifiersOpen && (
-                  <div
-                    role="tooltip"
-                    className="absolute left-0 top-full mt-1.5 z-20 w-64 px-3 py-2 bg-secondary border border-border text-foreground text-xs leading-relaxed rounded-lg shadow-md pointer-events-none"
-                  >
-                    <b>Used in this scan only.</b> Not saved — for values specific to this document, like a case number or counterparty name.
-                  </div>
-                )}
-              </div>
+              </InfoHint>
             </div>
 
             <h2 className="font-semibold text-base mt-5 mb-3">Detected Identifiers</h2>
@@ -1194,32 +1333,54 @@ export function MainScreen(): JSX.Element {
                             {group.entries.map(({ item, index }) => {
                               const isScrubbed = appState === 'scrubbed' && item.checked;
                               const isHovered = hoveredValue === item.value;
+                              const isPinned = pinnedValue === item.value;
+                              const pageSpan = new Set(item.bboxes.map((b) => b.page_num)).size;
                               return (
                                 <div
                                   key={`${item.type}:${item.value}`}
-                                  className={`flex items-start gap-3 -mx-1 px-1 py-0.5 rounded ${
-                                    isHovered ? 'bg-primary/10' : ''
+                                  className={`flex items-start gap-3 -mx-1 px-1 py-0.5 rounded cursor-pointer ${
+                                    isPinned
+                                      ? 'bg-primary/10 ring-1 ring-primary/40'
+                                      : isHovered
+                                        ? 'bg-primary/10'
+                                        : ''
                                   }`}
                                   onMouseEnter={() => setHoveredValue(item.value)}
                                   onMouseLeave={() =>
                                     setHoveredValue((v) => (v === item.value ? null : v))
+                                  }
+                                  onClick={() => togglePin(item.value)}
+                                  title={
+                                    pageSpan > 1
+                                      ? `Appears on ${pageSpan} pages — click to step through them`
+                                      : isPinned
+                                        ? 'Click to unpin'
+                                        : 'Click to lock the preview on this value'
                                   }
                                 >
                                   <input
                                     type="checkbox"
                                     checked={item.checked}
                                     onChange={() => handleTogglePII(index)}
+                                    onClick={(e) => e.stopPropagation()}
                                     disabled={appState === 'scrubbed'}
                                     className="mt-0.5 w-5 h-5 accent-primary cursor-pointer disabled:cursor-not-allowed flex-shrink-0"
                                   />
                                   <p className={`flex-1 min-w-0 text-foreground/70 break-words ${isScrubbed ? 'line-through opacity-60' : ''}`}>
                                     {item.value}
                                   </p>
-                                  {group.entries.length > 1 && (
-                                    <span className="text-xs text-muted-foreground flex-shrink-0 mt-0.5">
-                                      ×{item.count}
-                                    </span>
-                                  )}
+                                  <div className="flex items-center gap-1.5 flex-shrink-0 mt-0.5">
+                                    {pageSpan > 1 && (
+                                      <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                                        {pageSpan} pages
+                                      </span>
+                                    )}
+                                    {item.count > 1 && (
+                                      <span className="text-xs text-muted-foreground whitespace-nowrap">
+                                        ×{item.count}
+                                      </span>
+                                    )}
+                                  </div>
                                 </div>
                               );
                             })}
@@ -1290,7 +1451,7 @@ export function MainScreen(): JSX.Element {
 
           {/* Right column: PDF preview with bbox overlays */}
           <div className="flex-1 min-w-0 min-h-0 bg-card border border-border rounded-xl shadow-sm p-5 flex flex-col">
-            <div className="flex items-center justify-between mb-3">
+            <div className="relative flex items-center mb-3">
               <div className="flex items-center gap-2">
                 <h2 className="font-semibold text-base">Preview</h2>
                 <div className="relative">
@@ -1338,14 +1499,73 @@ export function MainScreen(): JSX.Element {
                   )}
                 </div>
               </div>
-              {previewPanel && (
-                <span className="text-xs text-muted-foreground">
-                  Page {previewPanel.pageNum} / {pages.size}
-                  {hoveredValue
-                    ? ` · ${previewPanel.overlays.filter((o) => o.isHovered).length} match(es)`
-                    : ` · ${previewPanel.overlays.length} highlight(s)`}
-                </span>
-              )}
+              {/* Navigator: steps through a pinned value's matches, or browses
+                  all document pages. Absolutely centered on the header line so
+                  it stays in the middle regardless of the title's width. */}
+              <div className="absolute left-1/2 -translate-x-1/2">
+                {previewPanel &&
+                (previewPanel.isPinned && previewPanel.activeMatchCount > 1 ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <NavButton
+                      dir="prev"
+                      onClick={() => setPinnedMatchIndex((i) => Math.max(0, i - 1))}
+                      disabled={previewPanel.matchIndex <= 0}
+                      label="Previous match"
+                    />
+                    <span className="text-foreground font-medium tabular-nums">
+                      Match {previewPanel.matchIndex + 1} of {previewPanel.activeMatchCount}
+                    </span>
+                    <NavButton
+                      dir="next"
+                      onClick={() =>
+                        setPinnedMatchIndex((i) =>
+                          Math.min(previewPanel.activeMatchCount - 1, i + 1),
+                        )
+                      }
+                      disabled={previewPanel.matchIndex >= previewPanel.activeMatchCount - 1}
+                      label="Next match"
+                    />
+                    <span className="text-muted-foreground/50">·</span>
+                    <span>Page {previewPanel.pageNum}</span>
+                  </div>
+                ) : previewPanel.activeValue ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span className="text-foreground font-medium tabular-nums">
+                      {previewPanel.activeMatchCount} Match
+                      {previewPanel.activeMatchCount === 1 ? '' : 'es'}
+                    </span>
+                    <span className="text-muted-foreground/50">·</span>
+                    <span>Page {previewPanel.pageNum}</span>
+                  </div>
+                ) : previewPanel.pageCount > 1 ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <NavButton
+                      dir="prev"
+                      onClick={() => setBrowsePageIndex((i) => Math.max(0, i - 1))}
+                      disabled={previewPanel.browseIndex <= 0}
+                      label="Previous page"
+                    />
+                    <span className="text-foreground font-medium tabular-nums">
+                      Page {previewPanel.pageNum} / {previewPanel.pageCount}
+                    </span>
+                    <NavButton
+                      dir="next"
+                      onClick={() =>
+                        setBrowsePageIndex((i) => Math.min(previewPanel.pageCount - 1, i + 1))
+                      }
+                      disabled={previewPanel.browseIndex >= previewPanel.pageCount - 1}
+                      label="Next page"
+                    />
+                  </div>
+                ) : (
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    Page {previewPanel.pageNum} / {previewPanel.pageCount}
+                    {` · ${previewPanel.overlays.length} highlight${
+                      previewPanel.overlays.length === 1 ? '' : 's'
+                    }`}
+                  </span>
+                ))}
+              </div>
             </div>
 
             <div ref={previewBoxRef} className="flex-1 min-h-0 flex items-center justify-center">
@@ -1353,7 +1573,7 @@ export function MainScreen(): JSX.Element {
                 <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground">
                   <Icon path={ICONS.file} className="w-12 h-12 text-muted-foreground/40 mb-3" />
                   <p>Run detection to preview pages.</p>
-                  <p className="mt-1">Hover a PII entry to highlight its location.</p>
+                  <p className="mt-1">Hover a PII entry to highlight it; click to step through every page it appears on.</p>
                 </div>
               )}
               {previewPanel && (() => {
@@ -1375,8 +1595,8 @@ export function MainScreen(): JSX.Element {
                   />
                   {previewPanel.overlays.map((o, i) => {
                     const base = HIGHLIGHT_COLORS[highlightColor].base;
-                    const anyHover = hoveredValue != null;
-                    const dimmed = anyHover && !o.isHovered;
+                    const anyActive = previewPanel.activeValue != null;
+                    const dimmed = anyActive && !o.isActive;
                     return (
                       <div
                         key={i}
@@ -1387,9 +1607,14 @@ export function MainScreen(): JSX.Element {
                           width: `${(o.bbox.w / previewPanel.page.image_width) * 100}%`,
                           height: `${(o.bbox.h / previewPanel.page.image_height) * 100}%`,
                           borderStyle: 'solid',
-                          borderWidth: o.isHovered ? 2 : 1,
+                          borderWidth: o.isActive ? 2 : 1,
                           borderColor: dimmed ? 'transparent' : base,
-                          backgroundColor: base + (o.isHovered ? '66' : dimmed ? '26' : '33'),
+                          backgroundColor:
+                            base + (o.isFocused ? '80' : o.isActive ? '66' : dimmed ? '26' : '33'),
+                          // The pinned-and-stepped-to occurrence gets a ring so
+                          // it stands out from other matches of the same value
+                          // sharing the page.
+                          boxShadow: o.isFocused ? `0 0 0 2px ${base}` : undefined,
                         }}
                       />
                     );

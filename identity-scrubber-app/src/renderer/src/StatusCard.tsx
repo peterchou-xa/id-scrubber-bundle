@@ -12,8 +12,8 @@ function formatBytes(bytes?: number): string {
 }
 
 export function StatusCard({ state, onRetry }: Props): JSX.Element {
-  if (state.stage === 'idle') {
-    return <IdleCard onRetry={onRetry} />;
+  if (state.stage === 'idle' || state.stage === 'checking' || state.stage === 'downloading') {
+    return <IdleCard state={state} onRetry={onRetry} />;
   }
   return (
     <section className="bg-card border border-border rounded-xl shadow-sm p-6 flex flex-col gap-4">
@@ -25,7 +25,8 @@ export function StatusCard({ state, onRetry }: Props): JSX.Element {
   );
 }
 
-function IdleCard({ onRetry }: { onRetry: () => void }): JSX.Element {
+function IdleCard({ state, onRetry }: { state: SetupState; onRetry: () => void }): JSX.Element {
+  const isIdle = state.stage === 'idle';
   return (
     <section className="bg-card border border-border rounded-xl shadow-sm p-8 flex flex-col items-center text-center gap-5">
       <div>
@@ -39,12 +40,22 @@ function IdleCard({ onRetry }: { onRetry: () => void }): JSX.Element {
       <div className="text-xs text-muted-foreground tracking-wide uppercase">
         One-time download · ~850 MB
       </div>
-      <button
-        onClick={onRetry}
-        className="px-6 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground text-sm font-medium rounded-lg transition-colors shadow-sm"
-      >
-        Download &amp; set up
-      </button>
+      {isIdle ? (
+        <button
+          onClick={onRetry}
+          className="px-6 py-2.5 bg-primary hover:bg-primary/90 text-primary-foreground text-sm font-medium rounded-lg transition-colors shadow-sm"
+        >
+          Download &amp; set up
+        </button>
+      ) : (
+        <div className="w-full max-w-md flex flex-col gap-2">
+          <div className="text-sm font-medium text-foreground">
+            {state.stage === 'checking' ? 'Getting ready to scrub…' : 'Downloading required files…'}
+          </div>
+          <StatusProgress state={state} />
+          <p className="text-xs text-muted-foreground m-0">Cached locally for future launches.</p>
+        </div>
+      )}
     </section>
   );
 }
