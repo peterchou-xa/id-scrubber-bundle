@@ -90,6 +90,8 @@ const dialogApi = {
   openPdf: (): Promise<PickedPdf> => ipcRenderer.invoke('dialog:openPdf'),
   openPath: (filePath: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('shell:openPath', filePath),
+  showItemInFolder: (filePath: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('shell:showItemInFolder', filePath),
 };
 
 export type DialogApi = typeof dialogApi;

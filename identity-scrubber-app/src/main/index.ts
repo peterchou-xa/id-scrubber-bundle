@@ -259,6 +259,11 @@ app.whenReady().then(() => {
     return { ok: err === '', error: err || undefined };
   });
 
+  ipcMain.handle('shell:showItemInFolder', (_evt, filePath: string) => {
+    shell.showItemInFolder(filePath);
+    return { ok: true };
+  });
+
   ipcMain.handle('identifiers:load', async () => {
     try {
       const values = await loadIdentifiers();

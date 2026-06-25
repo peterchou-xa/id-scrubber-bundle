@@ -178,6 +178,8 @@ const ICONS = {
   refresh: 'M23 4v6h-6 M1 20v-6h6 M3.51 9a9 9 0 0 1 14.85-3.36L23 10 M20.49 15a9 9 0 0 1-14.85 3.36L1 14',
   chevronLeft: 'M15 18l-6-6 6-6',
   chevronRight: 'M9 18l6-6-6-6',
+  folder:
+    'M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2z',
 };
 
 function NavButton({
@@ -754,23 +756,38 @@ export function MainScreen(): JSX.Element {
     }
   }, [piiItems, pinnedValue]);
 
+  const applyPickedFile = (name: string, path: string): void => {
+    // Clear scan-result state but preserve one-off identifiers — the user
+    // may have added them in preparation for the file they're picking now.
+    setAppState('empty');
+    setPiiItems([]);
+    setIsScanning(false);
+    setIsScrubbing(false);
+    setScrubbedPath('');
+    setPages(new Map());
+    setHoveredValue(null);
+    setPinnedValue(null);
+    setBrowsePageIndex(0);
+    setSelectedFile(name);
+    setSelectedFilePath(path);
+  };
+
   const handleFileSelect = async (): Promise<void> => {
     const picked = await window.dialogApi.openPdf();
-    if (picked) {
-      // Clear scan-result state but preserve one-off identifiers — the user
-      // may have added them in preparation for the file they're picking now.
-      setAppState('empty');
-      setPiiItems([]);
-      setIsScanning(false);
-      setIsScrubbing(false);
-      setScrubbedPath('');
-      setPages(new Map());
-      setHoveredValue(null);
-      setPinnedValue(null);
-      setBrowsePageIndex(0);
-      setSelectedFile(picked.name);
-      setSelectedFilePath(picked.path);
-    }
+    if (picked) applyPickedFile(picked.name, picked.path);
+  };
+
+  const [isDragging, setIsDragging] = useState(false);
+
+  const handleFileDrop = (e: React.DragEvent): void => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.pdf')) return;
+    // Electron exposes the absolute path on dropped File objects.
+    const path = (file as File & { path?: string }).path;
+    if (path) applyPickedFile(file.name, path);
   };
 
   useEffect(() => {
@@ -1020,6 +1037,14 @@ export function MainScreen(): JSX.Element {
     if (scrubbedPath) window.dialogApi.openPath(scrubbedPath);
   };
 
+  const handleRevealScrubbed = (): void => {
+    if (scrubbedPath) window.dialogApi.showItemInFolder(scrubbedPath);
+  };
+
+  const handleRevealSelected = (): void => {
+    if (selectedFilePath) window.dialogApi.showItemInFolder(selectedFilePath);
+  };
+
   const handleReset = (): void => {
     setAppState('empty');
     setSelectedFile('');
@@ -1171,18 +1196,34 @@ export function MainScreen(): JSX.Element {
             {!selectedFile ? (
               <button
                 onClick={handleFileSelect}
-                className="w-full px-3 py-4 bg-secondary border-2 border-dashed border-border rounded-lg hover:border-primary hover:bg-primary/5 transition-all flex flex-col items-center justify-center gap-2 group"
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={handleFileDrop}
+                className={`w-full px-3 py-4 bg-secondary border-2 border-dashed rounded-lg transition-all flex flex-col items-center justify-center gap-2 group ${
+                  isDragging
+                    ? 'border-primary bg-primary/5'
+                    : 'border-border hover:border-primary hover:bg-primary/5'
+                }`}
               >
                 <Icon
                   path={ICONS.fileUp}
-                  className="w-7 h-7 text-muted-foreground group-hover:text-primary transition-colors"
+                  className={`w-7 h-7 transition-colors ${
+                    isDragging ? 'text-primary' : 'text-muted-foreground group-hover:text-primary'
+                  }`}
                 />
-                <span className="text-sm text-muted-foreground group-hover:text-foreground transition-colors">
-                  Click to browse for a PDF
+                <span
+                  className={`text-sm transition-colors ${
+                    isDragging ? 'text-foreground' : 'text-muted-foreground group-hover:text-foreground'
+                  }`}
+                >
+                  {isDragging ? 'Drop your PDF here' : 'Drag a PDF here, or click to browse for one'}
                 </span>
               </button>
             ) : (
-              <div className="p-2.5 bg-primary/5 border border-primary/20 rounded-lg flex items-center gap-2">
+              <div className="group p-2.5 bg-primary/5 border border-primary/20 rounded-lg flex items-center gap-2">
                 <Icon path={ICONS.file} className="w-5 h-5 text-primary flex-shrink-0" />
                 <button
                   onClick={() => {
@@ -1192,6 +1233,14 @@ export function MainScreen(): JSX.Element {
                   title={selectedFile}
                 >
                   {selectedFile}
+                </button>
+                <button
+                  onClick={handleRevealSelected}
+                  aria-label="Show in folder"
+                  title="Show in folder"
+                  className="p-1 rounded-md text-primary opacity-0 group-hover:opacity-100 hover:bg-primary/10 transition-opacity cursor-pointer flex-shrink-0"
+                >
+                  <Icon path={ICONS.folder} className="w-4 h-4" />
                 </button>
                 <button
                   onClick={handleFileSelect}
@@ -1422,7 +1471,7 @@ export function MainScreen(): JSX.Element {
 
                 {appState === 'scrubbed' && (
                   <div className="sticky bottom-0 -mx-5 -mb-5 mt-3 px-5 pt-6 pb-6 bg-card border-t border-border flex flex-col gap-3 animate-slide-up-fade">
-                    <div className="bg-primary/5 border border-primary/20 rounded-lg p-3 flex items-center gap-3">
+                    <div className="group bg-primary/5 border border-primary/20 rounded-lg p-3 flex items-center gap-3">
                       <Icon path={ICONS.checkCircle} className="w-6 h-6 text-primary flex-shrink-0 animate-check-pop" />
                       <div className="flex-1 min-w-0 animate-text-fade-in">
                         <p className="text-sm font-medium">Scrub complete</p>
@@ -1434,6 +1483,13 @@ export function MainScreen(): JSX.Element {
                           {scrubbedPath ? scrubbedPath.split('/').pop() : ''}
                         </button>
                       </div>
+                      <button
+                        onClick={handleRevealScrubbed}
+                        className="flex-shrink-0 p-1.5 rounded-md text-primary opacity-0 group-hover:opacity-100 hover:bg-primary/10 transition-opacity cursor-pointer"
+                        title="Show in folder"
+                      >
+                        <Icon path={ICONS.folder} className="w-5 h-5" />
+                      </button>
                     </div>
                     <button
                       onClick={handleReset}
