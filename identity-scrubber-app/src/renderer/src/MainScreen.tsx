@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { BuyModal } from './BuyModal';
+import brushIcon from './assets/brush.png';
 
 /**
  * A trigger wrapped with a styled hover/focus tooltip ("info widget"). The
@@ -165,7 +166,6 @@ function Icon({ path, className }: { path: string; className?: string }): JSX.El
 }
 
 const ICONS = {
-  shield: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
   plus: 'M12 5v14 M5 12h14',
   fileUp: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M12 18v-6 M9 15l3-3 3 3',
   scan: 'M3 7V5a2 2 0 0 1 2-2h2 M17 3h2a2 2 0 0 1 2 2v2 M21 17v2a2 2 0 0 1-2 2h-2 M7 21H5a2 2 0 0 1-2-2v-2 M7 12h10',
@@ -1174,9 +1174,7 @@ export function MainScreen(): JSX.Element {
           </div>
         )}
         <div className="mb-4 flex items-center gap-2">
-          <div className="w-7 h-7 bg-primary/10 border border-primary rounded-md flex items-center justify-center">
-            <Icon path={ICONS.shield} className="w-4 h-4 text-primary" />
-          </div>
+          <img src={brushIcon} alt="" className="w-7 h-7 rounded-md object-cover" />
           <h1 className="tracking-tight text-base font-semibold">Identity Scrubber</h1>
           <div className="ml-auto flex items-center gap-2">
             <QuotaBadge
