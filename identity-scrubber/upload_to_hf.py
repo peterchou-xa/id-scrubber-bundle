@@ -5,7 +5,7 @@ Reads HF_TOKEN from the environment. Skips the 1.7GB fp32 graph by default
 
 Usage:
     export HF_TOKEN=hf_xxx
-    python upload_to_hf.py [--repo peterchou26/gliner-pii-onnx]
+    python upload_to_hf.py [--repo IdentityScrubber/gliner-pii-onnx]
                           [--src resources/models/gliner-pii-onnx]
                           [--include-fp32]
 """
@@ -16,7 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-DEFAULT_REPO = "peterchou26/gliner-pii-onnx"
+DEFAULT_REPO = "IdentityScrubber/gliner-pii-onnx"
 DEFAULT_SRC = "resources/models/gliner-pii-onnx"
 
 # Files that always go up — the runtime needs all of these together.
@@ -46,7 +46,7 @@ for use with `onnxruntime` instead of PyTorch.
 from gliner import GLiNER
 
 model = GLiNER.from_pretrained(
-    "peterchou26/gliner-pii-onnx",
+    "IdentityScrubber/gliner-pii-onnx",
     load_onnx_model=True,
     load_tokenizer=True,
     onnx_model_file="model_fp16.onnx",

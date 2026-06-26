@@ -7,7 +7,7 @@ import { Readable } from 'stream';
 import { securePath } from './secureStore';
 import { ensureDeviceId } from './deviceIdStore';
 
-export const GLINER_REPO = 'peterchou26/gliner-pii-onnx';
+export const GLINER_REPO = 'IdentityScrubber/gliner-pii-onnx';
 export const GLINER_MODEL_FILE = 'model_fp16.onnx';
 
 // All files that must exist locally for the python serve loop to start.

@@ -17,6 +17,10 @@ interface CatalogueEntry {
   tier: Tier;
   pages: number;
   price_cents: number;
+  // Wording mirrors the website pricing section (webserver/content/index.html).
+  perPage: string;
+  note: string;
+  badge?: string;
 }
 
 // Catalogue lives in the renderer — prices are stable enough that a server
@@ -24,9 +28,16 @@ interface CatalogueEntry {
 // service being up. The service still validates the tier on /checkout-url
 // and the webhook is the only thing that actually grants pages.
 const CATALOGUE: CatalogueEntry[] = [
-  { tier: 'starter', pages: 100, price_cents: 900 },
-  { tier: 'pro', pages: 500, price_cents: 1900 },
-  { tier: 'max', pages: 2000, price_cents: 4900 },
+  { tier: 'starter', pages: 100, price_cents: 900, perPage: '9¢ per page', note: 'never expires' },
+  {
+    tier: 'pro',
+    pages: 500,
+    price_cents: 1900,
+    perPage: '3.8¢ per page',
+    note: 'Save 58% vs Starter',
+    badge: 'Best value',
+  },
+  { tier: 'max', pages: 2000, price_cents: 4900, perPage: '2.5¢ per page', note: 'Best for high volume' },
 ];
 
 const POLL_INTERVAL_MS = 5_000;
@@ -53,12 +64,12 @@ export function BuyModal({
   onPrepaidChanged: () => void;
 }): JSX.Element | null {
   const [phase, setPhase] = useState<Phase>({ kind: 'choose' });
-  const [selectedTier, setSelectedTier] = useState<Tier>('starter');
+  const [selectedTier, setSelectedTier] = useState<Tier>('pro');
 
   useEffect(() => {
     if (!open) return;
     setPhase({ kind: 'choose' });
-    setSelectedTier('starter');
+    setSelectedTier('pro');
   }, [open]);
 
   useEffect(() => {
@@ -126,20 +137,29 @@ export function BuyModal({
                     onClick={() => setSelectedTier(entry.tier)}
                     aria-pressed={selected}
                     className={
-                      'flex flex-col items-start gap-2 w-full px-4 py-4 rounded-lg border-2 transition-colors cursor-pointer text-left ' +
+                      'relative flex flex-col items-start gap-2 w-full px-4 py-4 rounded-lg border-2 transition-colors cursor-pointer text-left ' +
                       (selected
                         ? 'border-primary bg-primary/10 ring-2 ring-primary/30'
                         : 'border-border bg-secondary hover:bg-secondary/80')
                     }
                   >
+                    {entry.badge && (
+                      <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] font-bold uppercase tracking-wider bg-primary text-primary-foreground px-2.5 py-0.5 rounded-full shadow">
+                        {entry.badge}
+                      </span>
+                    )}
                     <div className="font-medium capitalize">{entry.tier}</div>
                     <div className="text-2xl font-semibold">
                       {formatPrice(entry.price_cents)}
                     </div>
+                    <div className="text-xs text-muted-foreground">{entry.perPage}</div>
                     <div className="text-xs text-muted-foreground">
-                      {entry.pages.toLocaleString()} pages
+                      <strong className="font-semibold text-foreground">
+                        {entry.pages.toLocaleString()}
+                      </strong>{' '}
+                      pages
                     </div>
-                    <div className="text-xs text-muted-foreground">never expires</div>
+                    <div className="text-xs text-muted-foreground">{entry.note}</div>
                   </button>
                 );
               })}
